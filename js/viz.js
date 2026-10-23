@@ -82,7 +82,7 @@ function stopAutoFit() { autoFitDone = true; clearTimeout(fitTimer); fitTimer = 
 let replaying = false, replayTimer = null;
 
 const radialStrength = () => 0.02 + 0.5 * (1 - mix);
-const angularStrength = () => 0.01 + 0.15 * (1 - mix);
+const angularStrength = () => 0.05 + 0.35 * (1 - mix);
 
 /** Give every article its own slice of the circle around Philosophy. Each article's
  *  slice is split between its children in proportion to how many articles sit below it,
@@ -114,10 +114,12 @@ function assignAngles(list) {
     d.angle = (a0 + a1) / 2;
     const cs = (kids.get(d.title) || []).slice()
       .sort((a, b) => weight.get(b) - weight.get(a) || a.title.localeCompare(b.title));
-    const total = cs.reduce((s, c) => s + weight.get(c), 0) || 1;
+    // square root: a big branch gets a bigger slice, but not so big that it takes the whole circle
+    const share = c => Math.sqrt(weight.get(c));
+    const total = cs.reduce((s, c) => s + share(c), 0) || 1;
     let a = a0;
     for (const c of cs) {
-      const span = (a1 - a0) * weight.get(c) / total;
+      const span = (a1 - a0) * share(c) / total;
       place(c, a, a + span, seen);
       a += span;
     }
