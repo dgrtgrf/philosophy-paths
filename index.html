@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>All roads lead to Philosophy</title>
+<meta name="description" content="Click the first link of any Wikipedia article, again and again. Do you always reach Philosophy? Watch it happen.">
+<style>
+  /* ---------- base (same look as the desktop version) */
+  :root {
+    --bg: #f6f5f2; --ink: #18181b; --muted: #8f8f96; --line: #18181b;
+    --accent: #e4572e; --stranded: #b4b4ba; --panel: rgba(246,245,242,.9);
+    --rule: rgba(24,24,27,.12); --hover: rgba(24,24,27,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e0e10; --ink: #ececee; --muted: #73737b; --line: #ececee;
+      --accent: #ff7a50; --stranded: #4a4a52; --panel: rgba(14,14,16,.84);
+      --rule: rgba(236,236,238,.12); --hover: rgba(236,236,238,.06);
+    }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    overflow: hidden; -webkit-font-smoothing: antialiased; }
+  #viz { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  #viz:active { cursor: grabbing; }
+
+  /* ---------- graph */
+  .ring { fill: none; stroke: var(--ink); stroke-opacity: .045; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .ring.stranded { stroke-dasharray: 3 5; }
+  .ring-label { fill: var(--muted); fill-opacity: .55; font-weight: 500; text-anchor: middle;
+    paint-order: stroke; stroke: var(--bg); stroke-linejoin: round; }
+  .link { stroke: var(--line); stroke-linecap: round; fill: none; transition: opacity .15s; }
+  .node { fill: var(--ink); stroke: var(--bg); stroke-width: 1; cursor: pointer; transition: opacity .15s; }
+  .node.leaf { fill: var(--muted); }
+  .node.stranded { fill: var(--bg); stroke: var(--stranded); stroke-width: 1.2; }
+  .node.root { fill: var(--accent); stroke: none; }
+  .node.fresh { stroke: var(--accent); stroke-width: 2; }
+  .label { fill: var(--ink); font-weight: 500; pointer-events: none;
+    paint-order: stroke; stroke: var(--bg); stroke-linejoin: round; }
+  .label.root { fill: var(--accent); font-weight: 650; }
+
+  svg.dim .link:not(.hl) { opacity: .05; }
+  svg.dim .node:not(.hl) { opacity: .15; }
+  svg.dim .label:not(.hl) { opacity: .1; }
+  .link.hl { stroke: var(--accent); }
+  .node.hl { stroke: var(--accent); stroke-width: 2; }
+
+  /* ---------- panels */
+  .panel { position: fixed; background: var(--panel); backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px); border: 1px solid var(--rule); border-radius: 12px;
+    padding: 14px 16px; box-sizing: border-box; }
+  h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  h2 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .06em; }
+  .sub { color: var(--muted); margin: 2px 0 10px; }
+  #head { top: 18px; left: 18px; width: 270px; }
+  .stats { display: grid; grid-template-columns: 1fr auto; gap: 2px 18px; color: var(--muted); }
+  .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+  #live { display: none; align-items: center; gap: 7px; margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+  #live.on { display: flex; }
+  #live i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  #live.running i { animation: pulse 1.4s ease-in-out infinite; }
+  #live.done i { background: var(--muted); }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+
+  #side { top: 18px; right: 18px; width: 270px; max-height: calc(100vh - 230px); overflow-y: auto; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center;
+    padding: 4px 6px; margin: 0 -6px; border-radius: 6px; cursor: pointer; }
+  .row:hover { background: var(--hover); }
+  .row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row b { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+  .bar { grid-column: 1 / -1; height: 3px; border-radius: 2px; background: var(--rule); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--ink); opacity: .55; }
+  .hist { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin-top: 4px; }
+  .hist i { flex: 1; background: var(--ink); opacity: .5; border-radius: 2px 2px 0 0; min-height: 1px; }
+  .hist-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .section + .section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--rule); }
+  .pin-title { font-size: 15px; font-weight: 650; margin: 0 0 2px; padding-right: 22px; }
+  .close { position: absolute; top: 10px; right: 12px; border: 0; background: none; color: var(--muted);
+    font-size: 18px; cursor: pointer; line-height: 1; padding: 2px 4px; }
+  .close:hover { color: var(--ink); }
+  .route { line-height: 1.6; }
+  .route .step { cursor: pointer; }
+  .route .step:hover { text-decoration: underline; }
+  .tag { display: inline-block; font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
+    margin-right: 6px; }
+  a.wiki { display: inline-block; margin-top: 12px; color: var(--accent); text-decoration: none; font-weight: 600; }
+  a.wiki:hover { text-decoration: underline; }
+
+  #controls { bottom: 18px; left: 18px; width: 290px; }
+  .seg { display: flex; background: var(--hover); border-radius: 8px; padding: 2px; margin-bottom: 14px; }
+  .seg button { flex: 1; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px;
+    font-weight: 600; padding: 5px 0; border-radius: 6px; cursor: pointer; }
+  .seg button.on { background: var(--bg); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  label.cap { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; margin-bottom: 6px; }
+  .ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+  .btns { display: flex; gap: 6px; margin-top: 12px; }
+  .btns button, .btns label { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
+    border: 1px solid var(--rule); background: transparent; color: var(--ink); font: inherit; font-size: 12px;
+    padding: 6px 4px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+  .btns button:hover, .btns label:hover { background: var(--hover); }
+  .btns input { accent-color: var(--accent); margin: 0; }
+  input[type=search] { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 7px 10px;
+    border: 1px solid var(--rule); border-radius: 8px; background: transparent; color: var(--ink);
+    font: inherit; outline: none; }
+  input[type=search]:focus { border-color: var(--accent); }
+
+  #legend { bottom: 18px; right: 18px; color: var(--muted); font-size: 12px; max-width: 270px; }
+  #legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  .sw { width: 22px; flex: none; display: inline-flex; justify-content: center; }
+  .hint { margin-top: 6px !important; }
+
+  #tip { position: fixed; pointer-events: none; max-width: 320px; opacity: 0; transition: opacity .1s;
+    font-size: 12px; z-index: 5; }
+  #tip .t { font-weight: 650; font-size: 13px; margin-bottom: 4px; }
+  #tip .m { color: var(--muted); }
+  #tip .r { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--rule); }
+
+  /* ---------- site additions */
+  .tabs { margin: 10px 0 2px; }
+  .seg button:disabled { opacity: .45; cursor: default; }
+  #status { display: none; align-items: center; gap: 7px; margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+  #status.on { display: flex; }
+  #status i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  #status.live i { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  #status.warn i { background: #d4a72c; }
+  #status.err { color: var(--accent); }
+  #status.err i { background: var(--accent); }
+  #runBox { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+  .runrow { display: flex; gap: 6px; }
+  .runrow select { flex: 1; min-width: 0; border: 1px solid var(--rule); border-radius: 8px; background: transparent;
+    color: var(--ink); font: inherit; font-size: 12px; padding: 6px 8px; }
+  #go { flex: 1; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit;
+    font-size: 13px; font-weight: 650; padding: 7px 10px; cursor: pointer; }
+  #go.stop { background: var(--ink); color: var(--bg); }
+  #startFrom { margin-top: 8px !important; }
+  .share { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .share input { accent-color: var(--accent); margin: 0; }
+  #empty { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    pointer-events: none; color: var(--muted); text-align: center; padding: 0 340px; }
+  #empty div { max-width: 360px; }
+  #empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 6px; }
+  #side:empty { display: none; }
+
+  /* ---------- small screens: compact panels, extras hidden */
+  @media (max-width: 900px) {
+    #head { width: auto; right: 10px; left: 10px; top: 10px; padding: 10px 12px; }
+    h1 { font-size: 14px; }
+    .tabs { margin: 8px 0 0; }
+    .sub { margin: 4px 0 6px; font-size: 12px; }
+    .stats { grid-template-columns: 1fr auto 1fr auto; gap: 1px 10px; font-size: 12px; }
+    #status { margin-top: 6px; padding-top: 6px; }
+    #controls { left: 10px; right: 10px; bottom: 10px; width: auto; padding: 10px 12px; }
+    #controls .seg { margin-bottom: 10px; }
+    #runBox { margin: 0; padding: 0; border: 0; }
+    #startFrom, #controls .cap, #mix, .ends, .btns, #search { display: none; }
+    #side, #legend { display: none; }
+    #empty { padding: 0 24px; }
+  }
+</style>
+
+</head>
+<body>
+<svg id="viz"></svg>
+<div id="empty"></div>
+
+<div id="head" class="panel">
+  <h1>All roads lead to Philosophy</h1>
+  <div class="seg tabs" id="tabs">
+    <button data-tab="mine" class="on">My tree</button>
+    <button data-tab="everyone">Everyone's tree</button>
+  </div>
+  <div class="sub" id="subtitle"></div>
+  <div class="stats" id="stats"></div>
+  <div id="status"><i></i><span id="statusText"></span></div>
+</div>
+
+<div id="side" class="panel"></div>
+
+<div id="controls" class="panel">
+  <div class="seg" id="modes">
+    <button data-mode="classic" class="on" title="Skip every link in brackets or italics">Classic rules</button>
+    <button data-mode="smart" title="Only skip brackets with pronunciation, origins or dates; allow scientific names">Smart rules</button>
+  </div>
+  <div id="runBox">
+    <div class="runrow">
+      <select id="count" aria-label="How many articles">
+        <option value="10">10 articles</option>
+        <option value="25" selected>25 articles</option>
+        <option value="50">50 articles</option>
+        <option value="100">100 articles</option>
+        <option value="250">250 articles</option>
+      </select>
+      <button id="go">Start</button>
+    </div>
+    <input id="startFrom" type="search" placeholder="Or start from… (e.g. Banana, Jazz)" autocomplete="off">
+    <label class="share" id="shareBox"><input type="checkbox" id="share" checked> Add my routes to everyone's tree</label>
+  </div>
+  <label class="cap" for="mix">Layout</label>
+  <input id="mix" type="range" min="0" max="1" step="0.01" value="0.3">
+  <div class="ends"><span>Tree rings</span><span>Relevance</span></div>
+  <div class="btns">
+    <label><input type="checkbox" id="topics"> Topics</label>
+    <button id="replay">▶ Replay</button>
+    <button id="export">Save image</button>
+  </div>
+  <input id="search" type="search" placeholder="Find an article in the tree…" list="titles" autocomplete="off">
+  <datalist id="titles"></datalist>
+</div>
+
+<div id="legend" class="panel"></div>
+<div id="tip" class="panel"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
