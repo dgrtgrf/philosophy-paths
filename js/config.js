@@ -10,7 +10,7 @@ export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiO
 // Sent to Wikipedia with every request so they know who runs the site.
 // Put your site's address here once it's published, e.g.
 // "PathsToPhilosophy/1.0 (https://yourname.github.io/philosophy-paths)"
-export const SITE_CONTACT = "PathsToPhilosophy/1.0 (https://github.com)";
+export const SITE_CONTACT = "PathsToPhilosophy/1.0 (https://dgrtgrf.github.io/philosophy-paths)";
 
 // How many of the most recent shared routes "Everyone's tree" shows.
 // Much more than a few thousand gets slow to draw.
