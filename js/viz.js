@@ -82,6 +82,59 @@ function stopAutoFit() { autoFitDone = true; clearTimeout(fitTimer); fitTimer = 
 let replaying = false, replayTimer = null;
 
 const radialStrength = () => 0.02 + 0.5 * (1 - mix);
+const angularStrength = () => 0.01 + 0.15 * (1 - mix);
+
+/** Give every article its own slice of the circle around Philosophy. Each article's
+ *  slice is split between its children in proportion to how many articles sit below it,
+ *  so branches fan out evenly in every direction instead of bunching on one side. */
+function assignAngles(list) {
+  const byT = new Map(list.map(d => [d.title, d]));
+  const kids = new Map();
+  for (const d of list) {
+    d.angle = null;
+    if (d.next && d.next !== d.title && byT.has(d.next)) {
+      if (!kids.has(d.next)) kids.set(d.next, []);
+      kids.get(d.next).push(d);
+    }
+  }
+  const root = list.find(d => d.status === "root");
+  if (!root) return;
+  const weight = new Map();
+  const size = d => {
+    if (weight.has(d)) return weight.get(d);
+    let s = 1;
+    for (const c of kids.get(d.title) || []) s += size(c);
+    weight.set(d, s);
+    return s;
+  };
+  size(root);
+  const place = (d, a0, a1, seen) => {
+    if (seen.has(d)) return;            // guard against a loop in the data
+    seen.add(d);
+    d.angle = (a0 + a1) / 2;
+    const cs = (kids.get(d.title) || []).slice()
+      .sort((a, b) => weight.get(b) - weight.get(a) || a.title.localeCompare(b.title));
+    const total = cs.reduce((s, c) => s + weight.get(c), 0) || 1;
+    let a = a0;
+    for (const c of cs) {
+      const span = (a1 - a0) * weight.get(c) / total;
+      place(c, a, a + span, seen);
+      a += span;
+    }
+  };
+  place(root, 0, 2 * Math.PI, new Set());
+}
+
+/** Pulls each article toward its own angle, at its own ring. */
+function angularForce(alpha) {
+  const s = angularStrength() * alpha;
+  for (const d of nodes) {
+    if (d.angle == null || d.status === "root" || d.fx != null) continue;
+    const r = ringOf(d);
+    d.vx += (Math.cos(d.angle) * r - d.x) * s;
+    d.vy += (Math.sin(d.angle) * r - d.y) * s;
+  }
+}
 const relevanceWeight = () => 0.3 + 1.7 * mix;
 
 // ================================================================ public API
@@ -103,6 +156,7 @@ export function initViz() {
     .force("charge", d3.forceManyBody().strength(-70).distanceMax(500))
     .force("collide", d3.forceCollide(d => radius(d) + 1.5).iterations(2))
     .force("radial", d3.forceRadial(d => ringOf(d), 0, 0))
+    .force("angular", angularForce)
     .alphaDecay(0.012);
   sim.on("tick", () => {
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
@@ -195,11 +249,16 @@ function update(g, first) {
     Object.assign(d, n);
     return d;
   });
-  // place new arrivals next to the article they point to (reverse order so anchors come first)
+  assignAngles(nodes);
+  // place new arrivals on their slice of the circle; fall back to next to their anchor
   for (const d of [...nodes].reverse()) {
     if (!fresh.has(d)) continue;
     const anchor = d.next && byTitle.get(d.next);
-    if (anchor && anchor.x != null && anchor !== d) {
+    if (d.angle != null && d.status !== "root") {
+      const r = ringOf(d);
+      d.x = Math.cos(d.angle) * r + (Math.random() - 0.5) * 10;
+      d.y = Math.sin(d.angle) * r + (Math.random() - 0.5) * 10;
+    } else if (anchor && anchor.x != null && anchor !== d) {
       d.x = anchor.x + (Math.random() - 0.5) * 30; d.y = anchor.y + (Math.random() - 0.5) * 30;
     } else {
       const a = Math.random() * 2 * Math.PI, r = ringOf(d) || 0.001;
