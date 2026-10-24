@@ -1,4 +1,5 @@
-// stats.js — "Today & stats": one route of the day and some charts about everyone's shared routes.
+// stats.js — "Today": a route of the day, and charts about everyone's shared routes.
+/* global d3 */
 
 const TARGET = "Philosophy";
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -6,6 +7,9 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const wikiURL = t => "https://en.wikipedia.org/wiki/" + encodeURIComponent(t.replace(/ /g, "_"));
 const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
 const MODE = m => m === "smart" ? "Smart rules" : "Classic rules";
+const width = sel => Math.max(280, Math.round(sel.node().getBoundingClientRect().width) || 480);
+const trim = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+const OUTCOME_COLOURS = { philosophy: "#e4572e", loop: "#8f8f96", dead_end: "#4c78a8", too_long: "#d4a72c", missing: "#72b7b2" };
 
 /** The first sentence of an article's introduction, for explaining each step. */
 function firstSentence(text) {
@@ -39,95 +43,183 @@ export function pickRouteOfDay(routes, clusterOf, date) {
   return pool[hash(date) % pool.length];
 }
 
-function bars(items, fmt = v => v) {
-  const top = Math.max(1, ...items.map(i => i.value));
-  return items.map(i => `<div class="row"><span>${esc(i.label)}</span><b>${fmt(i.value)}</b>
-    <div class="bar"><i style="width:${(100 * i.value / top).toFixed(1)}%"></i></div></div>`).join("");
+// ─────────────────────────────────────────────── charts (d3, drawn into SVG) ──
+function hbar(sel, items, format = d => d.value) {
+  sel.html("");
+  if (!items.length) { sel.append("div").attr("class", "sub").text("Nothing yet."); return; }
+  const W = width(sel), L = Math.min(170, Math.round(W * 0.42)), RH = 24, H = items.length * RH + 6;
+  const svg = sel.append("svg").attr("width", W).attr("height", H).attr("class", "chart");
+  const x = d3.scaleLinear().domain([0, d3.max(items, d => d.value) || 1]).range([0, W - L - 70]);
+  const g = svg.selectAll("g").data(items).join("g").attr("transform", (d, i) => `translate(0,${i * RH + 4})`);
+  g.append("title").text(d => d.label);
+  g.append("text").attr("class", "tick").attr("x", L - 8).attr("y", 13).attr("text-anchor", "end").text(d => trim(d.label, 24));
+  g.append("rect").attr("class", "bar-fill").attr("x", L).attr("y", 3).attr("height", 15).attr("rx", 3)
+    .attr("width", d => Math.max(2, x(d.value)));
+  g.append("text").attr("class", "val").attr("x", d => L + x(d.value) + 6).attr("y", 14).text(d => format(d));
 }
 
-function routeCard(pick, texts, labels, mode, date) {
+function histogram(sel, clicks) {
+  sel.html("");
+  if (!clicks.length) { sel.append("div").attr("class", "sub").text("No route has reached Philosophy yet."); return; }
+  const lo = clicks[0], hi = clicks[clicks.length - 1];
+  const data = d3.range(lo, hi + 1).map(c => ({ c, n: clicks.filter(x => x === c).length }));
+  const W = width(sel), H = 200, m = { l: 34, r: 8, t: 10, b: 28 };
+  const svg = sel.append("svg").attr("width", W).attr("height", H).attr("class", "chart");
+  const x = d3.scaleBand().domain(data.map(d => d.c)).range([m.l, W - m.r]).padding(0.15);
+  const y = d3.scaleLinear().domain([0, d3.max(data, d => d.n)]).nice().range([H - m.b, m.t]);
+  svg.append("g").attr("class", "axis").attr("transform", `translate(0,${H - m.b})`)
+    .call(d3.axisBottom(x).tickValues(data.map(d => d.c).filter(c => c % Math.ceil(data.length / 12) === 0 || c === lo))
+      .tickSize(0).tickPadding(6)).call(a => a.select(".domain").remove());
+  svg.append("g").attr("class", "axis").attr("transform", `translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r)).tickFormat(d3.format("d")))
+    .call(a => a.select(".domain").remove());
+  svg.selectAll("rect.col").data(data).join("rect").attr("class", "bar-fill col")
+    .attr("x", d => x(d.c)).attr("width", x.bandwidth()).attr("y", d => y(d.n)).attr("height", d => y(0) - y(d.n))
+    .append("title").text(d => `${d.c} clicks: ${plural(d.n, "route")}`);
+  svg.append("text").attr("class", "tick").attr("x", (m.l + W) / 2).attr("y", H - 2).attr("text-anchor", "middle").text("clicks to Philosophy");
+}
+
+function donut(sel, routes) {
+  sel.html("");
+  const counts = Object.entries({ philosophy: "Reached Philosophy", loop: "Loop back", dead_end: "Dead end",
+    too_long: "Too long", missing: "Missing page" }).map(([k, label]) => ({
+    key: k, label, value: routes.filter(r => r.outcome === k).length,
+  })).filter(d => d.value);
+  const total = routes.length;
+  const wrap = sel.append("div").attr("class", "donut");
+  const svg = wrap.append("svg").attr("viewBox", "0 0 200 200").attr("class", "chart pie");
+  const arc = d3.arc().innerRadius(56).outerRadius(90);
+  const pie = d3.pie().value(d => d.value).sort(null);
+  svg.selectAll("path").data(pie(counts)).join("path").attr("d", arc).attr("transform", "translate(100,100)")
+    .attr("fill", d => OUTCOME_COLOURS[d.data.key]).attr("stroke", "var(--bg)").attr("stroke-width", 2)
+    .append("title").text(d => `${d.data.label}: ${plural(d.data.value, "route")}`);
+  const reached = counts.find(d => d.key === "philosophy")?.value || 0;
+  svg.append("text").attr("x", 100).attr("y", 104).attr("text-anchor", "middle").attr("class", "donut-big")
+    .text(pct(reached, total));
+  svg.append("text").attr("x", 100).attr("y", 122).attr("text-anchor", "middle").attr("class", "tick").text("reached");
+  const legend = wrap.append("ul").attr("class", "legend");
+  counts.forEach(d => {
+    const li = legend.append("li");
+    li.append("i").style("background", OUTCOME_COLOURS[d.key]);
+    li.append("span").text(`${d.label}`);
+    li.append("b").text(`${pct(d.value, total)}`);
+  });
+}
+
+function reachLine(sel, routes) {
+  sel.html("");
+  if (routes.length < 2) { sel.append("div").attr("class", "sub").text("Needs a few more routes."); return; }
+  let ok = 0;
+  const step = Math.max(1, Math.ceil(routes.length / 400));
+  const pts = [];
+  routes.forEach((r, i) => {
+    if (r.outcome === "philosophy") ok++;
+    if ((i + 1) % step === 0 || i === routes.length - 1) pts.push({ i: i + 1, v: 100 * ok / (i + 1) });
+  });
+  const W = width(sel), H = 200, m = { l: 36, r: 12, t: 10, b: 28 };
+  const svg = sel.append("svg").attr("width", W).attr("height", H).attr("class", "chart");
+  const x = d3.scaleLinear().domain([1, routes.length]).range([m.l, W - m.r]);
+  const y = d3.scaleLinear().domain([0, 100]).range([H - m.b, m.t]);
+  svg.append("g").attr("class", "axis").attr("transform", `translate(0,${H - m.b})`)
+    .call(d3.axisBottom(x).ticks(5).tickSize(0).tickPadding(6)).call(a => a.select(".domain").remove());
+  svg.append("g").attr("class", "axis").attr("transform", `translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(4).tickFormat(d => d + "%").tickSize(-(W - m.l - m.r)))
+    .call(a => a.select(".domain").remove());
+  const area = d3.area().x(d => x(d.i)).y0(y(0)).y1(d => y(d.v));
+  const line = d3.line().x(d => x(d.i)).y(d => y(d.v));
+  svg.append("path").datum(pts).attr("class", "area").attr("d", area);
+  svg.append("path").datum(pts).attr("class", "line").attr("d", line);
+  svg.append("text").attr("class", "tick").attr("x", (m.l + W) / 2).attr("y", H - 2).attr("text-anchor", "middle")
+    .text("routes, in the order they were shared");
+}
+
+// ─────────────────────────────────────────────── the page ──
+function routeOfDayHTML(pick, texts, labels, mode, date) {
   const { route, topics, rare, rescued } = pick;
   const steps = route.path.map(t => {
     const s = firstSentence(texts.get(t));
     return `<li><a href="${wikiURL(t)}" target="_blank" rel="noopener">${esc(t)}</a>${s ? `<span class="why">${esc(s)}</span>` : ""}</li>`;
   }).join("");
   const facts = [
-    `${plural(route.path.length - 1, "click")} from ${esc(route.start)} to Philosophy`,
     topics.length >= 2 ? `Passes through ${topics.length} topics: ${topics.slice(0, 4).map(c => esc(labels[c] || "…")).join(", ")}` : null,
     rescued && mode === "smart" ? `${plural(rescued, "step")} that only smart rules could follow` : null,
     rare ? "Visits at least one article that very few routes touch" : null,
   ].filter(Boolean);
-  return `<section class="card feature">
-    <div class="kicker">Route of the day · ${esc(date)}</div>
-    <h2 class="big">${esc(route.start)} → Philosophy</h2>
-    <ol class="steps">${steps}</ol>
-    <ul class="facts">${facts.map(f => `<li>${f}</li>`).join("")}</ul>
+  return `<section class="card rotd">
+    <details>
+      <summary>
+        <div class="kicker">Route of the day · ${esc(date)}</div>
+        <h2 class="big">${esc(trim(route.start, 40))} → Philosophy</h2>
+        <div class="sub">${plural(route.path.length - 1, "click")}${topics.length ? ` · ${topics.length} topics` : ""} · tap to read the route</div>
+      </summary>
+      <ol class="steps">${steps}</ol>
+      ${facts.length ? `<ul class="facts">${facts.map(f => `<li>${f}</li>`).join("")}</ul>` : ""}
+    </details>
   </section>`;
 }
 
-/** HTML for the whole page. */
-export function statsHTML({ routes, texts, clusterOf, labels, mode, loading, error, date }) {
-  if (loading) return `<div class="sub">Loading everyone's routes…</div>`;
-  if (error) return `<div class="sub">${esc(error)}</div>`;
-  if (!routes.length)
-    return `<h1>Today &amp; stats</h1><div class="sub">No shared routes yet for ${MODE(mode).toLowerCase()}. Once people share theirs, the stats appear here.</div>`;
-
+/** Draw the whole page into root. */
+export function renderStats(root, o) {
+  const msg = t => `<div class="sub">${esc(t)}</div>`;
+  if (o.loading) { root.innerHTML = msg("Loading everyone's routes…"); return; }
+  if (o.error) { root.innerHTML = msg(o.error); return; }
+  const { routes, texts, clusterOf, labels, mode, date } = o;
+  if (!routes.length) {
+    root.innerHTML = `<h1>Today</h1>` + msg(`No shared routes yet for ${MODE(mode).toLowerCase()}. Once people share theirs, the stats appear here.`);
+    return;
+  }
   const n = routes.length;
   const reached = routes.filter(r => r.outcome === "philosophy");
-  const count = o => routes.filter(r => r.outcome === o).length;
+  const count = out => routes.filter(r => r.outcome === out).length;
   const clicks = reached.map(r => r.path.length - 1).sort((a, b) => a - b);
   const pick = pickRouteOfDay(routes, clusterOf, date);
 
-  let html = `<h1>Today &amp; stats</h1><div class="sub">Everyone's tree · ${MODE(mode)} · ${plural(n, "route")}</div>`;
-  if (pick) html += `<div class="cards">${routeCard(pick, texts, labels, mode, date)}</div>`;
+  root.innerHTML = `
+    <h1>Today</h1>
+    <div class="sub">Everyone's tree · ${MODE(mode)} · ${plural(n, "route")}</div>
+    <div class="cards">
+      ${pick ? routeOfDayHTML(pick, texts, labels, mode, date) : ""}
+      <section class="card"><h2>Reached Philosophy</h2><div class="big-number">${pct(reached.length, n)}</div>
+        <div class="sub">${plural(reached.length, "route")} of ${n}${clicks.length ? ` · median ${clicks[Math.floor(clicks.length / 2)]} clicks · longest ${clicks[clicks.length - 1]}` : ""}</div></section>
+    </div>
+    <div class="cards">
+      <section class="card"><h2>Clicks to Philosophy</h2><div data-c="hist"></div></section>
+      <section class="card"><h2>How routes end</h2><div data-c="donut"></div></section>
+      <section class="card wide"><h2>Share reaching Philosophy, as routes come in</h2><div data-c="line"></div></section>
+      <section class="card"><h2>Last stop before Philosophy</h2><div data-c="gate"></div></section>
+      <section class="card"><h2>Where routes get stuck</h2><div data-c="stuck"></div></section>
+      <section class="card"><h2>Starting points: reach rate</h2><div data-c="start"></div></section>
+      <section class="card"><h2>Routes touching each topic</h2><div data-c="topic"></div></section>
+    </div>`;
 
-  html += `<div class="grid">${[
-    ["Routes", n], ["Reached Philosophy", pct(reached.length, n)],
-    ["Median clicks", clicks.length ? clicks[Math.floor(clicks.length / 2)] : "–"],
-    ["Longest route", clicks.length ? clicks[clicks.length - 1] : "–"],
-    ["Loops back", pct(count("loop"), n)], ["Dead ends", pct(count("dead_end"), n)],
-    ["Missing pages", pct(count("missing"), n)],
-  ].map(([a, b]) => `<div class="tile"><b>${b}</b><span>${a}</span></div>`).join("")}</div>`;
+  const c = name => d3.select(root).select(`[data-c=${name}]`);
+  histogram(c("hist"), clicks);
+  donut(c("donut"), routes);
+  reachLine(d3.select(root).select("[data-c=line]"), routes);
 
-  const cards = [];
-  if (clicks.length) {
-    const lo = clicks[0], hi = clicks[clicks.length - 1];
-    const counts = Array.from({ length: hi - lo + 1 }, (_, i) => clicks.filter(c => c === lo + i).length);
-    const peak = Math.max(...counts);
-    cards.push(`<h2>Clicks to Philosophy</h2><div class="hist">${counts.map((c, i) =>
-      `<i title="${lo + i} clicks: ${plural(c, "route")}" style="height:${(100 * c / peak).toFixed(1)}%"></i>`).join("")}</div>
-      <div class="hist-axis"><span>${lo}</span><span>${hi}</span></div>`);
-  }
-  cards.push(`<h2>How routes end</h2>` + bars([
-    { label: "Reach Philosophy", value: count("philosophy") }, { label: "Loop back", value: count("loop") },
-    { label: "Dead end", value: count("dead_end") }, { label: "Too long", value: count("too_long") },
-    { label: "Missing page", value: count("missing") },
-  ]));
+  const top = (map, k = 8) => [...map].sort((a, b) => b[1] - a[1]).slice(0, k).map(([label, value]) => ({ label, value }));
   const gates = new Map();
   for (const r of reached) if (r.path.length >= 2) {
     const g = r.path[r.path.length - 2]; gates.set(g, (gates.get(g) || 0) + 1);
   }
-  cards.push(`<h2>Last stop before Philosophy</h2>` + bars([...gates].sort((a, b) => b[1] - a[1]).slice(0, 8)
-    .map(([label, value]) => ({ label, value }))));
+  hbar(c("gate"), top(gates));
   const stuck = new Map();
   for (const r of routes) if (r.outcome !== "philosophy") {
     const g = r.path[r.path.length - 1]; stuck.set(g, (stuck.get(g) || 0) + 1);
   }
-  cards.push(`<h2>Where routes get stuck</h2>` + (stuck.size ? bars([...stuck].sort((a, b) => b[1] - a[1]).slice(0, 8)
-    .map(([label, value]) => ({ label, value }))) : `<div class="sub">Every route reached Philosophy.</div>`));
+  hbar(c("stuck"), top(stuck));
+
   const starts = new Map();
   for (const r of routes) {
     const s = starts.get(r.path[0]) || { total: 0, ok: 0 };
     s.total++; if (r.outcome === "philosophy") s.ok++;
     starts.set(r.path[0], s);
   }
-  cards.push(`<h2>Starting points</h2>` + [...starts].sort((a, b) => b[1].total - a[1].total).slice(0, 8)
-    .map(([t, s]) => `<div class="row"><span>${esc(t)}</span><b>${pct(s.ok, s.total)} of ${s.total}</b></div>`).join(""));
-  const topicCount = labels.map((lab, i) => ({
-    label: lab, value: routes.filter(r => r.path.some(t => clusterOf.get(t) === i)).length,
-  })).filter(x => x.value);
-  if (topicCount.length) cards.push(`<h2>Routes touching each topic</h2>` + bars(topicCount));
+  const startRows = [...starts].sort((a, b) => b[1].total - a[1].total).slice(0, 8)
+    .map(([label, s]) => ({ label, value: Math.round(100 * s.ok / s.total), total: s.total }));
+  hbar(c("start"), startRows, d => `${d.value}% of ${d.total}`);
 
-  html += `<div class="cards">${cards.map(c => `<section class="card">${c}</section>`).join("")}</div>`;
-  return html;
+  const topics = labels.map((label, i) => ({ label, value: routes.filter(r => r.path.some(t => clusterOf.get(t) === i)).length }))
+    .filter(x => x.value).sort((a, b) => b.value - a.value);
+  hbar(c("topic"), topics);
 }

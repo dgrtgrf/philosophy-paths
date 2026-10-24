@@ -2,7 +2,7 @@
 
 import { Crawler } from "./crawler.js";
 import { initViz, setData, resetSlot, esc, plural } from "./viz.js";
-import { statsHTML } from "./stats.js";
+import { renderStats } from "./stats.js";
 import * as shared from "./shared.js";
 
 const $ = id => document.getElementById(id);
@@ -61,7 +61,7 @@ function routesFor(slot) {
 }
 
 function render() {
-  if (state.tab === "stats") { renderStatsPage(); renderChrome(); return; }
+  if (state.tab === "stats") { renderChrome(); renderStatsPage(); return; }   // show the page first, so charts measure correctly
   const slot = currentSlot();
   const mode = state.tab === "mine" ? state.mine.mode : state.mode;
   const subtitle = state.tab === "mine" ? `My tree · ${MODE_NAMES[mode]}` : `Everyone's tree · ${MODE_NAMES[mode]}`;
@@ -72,7 +72,7 @@ function render() {
 function renderStatsPage() {
   const mode = state.mode;
   const a = state.analysis[`everyone-${mode}`] || {};
-  $("page").innerHTML = statsHTML({
+  renderStats($("page"), {
     routes: state.everyone[mode] || [], texts,
     clusterOf: new Map(Object.entries(a.clusters || {})), labels: a.clusterLabels || [],
     mode, loading: state.everyone.loading, error: state.everyone.error,
@@ -284,3 +284,5 @@ document.querySelectorAll("#modes button").forEach(b => b.onclick = () => {
 // ─────────────────────────────────────────────── go ──
 initViz();
 render();
+let resizeT;
+window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (state.tab === "stats") renderStatsPage(); }, 200); });

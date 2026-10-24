@@ -64,7 +64,7 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
 }
 
 // ================================================================ state
-let svg, world, gClouds, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
+let svg, world, gHaze, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
 let nodes = [], links = [], springs = [];
 let byTitle = new Map();
 const slots = new Map();      // "mine" / "everyone" → { byTitle, autoFitDone, transform }
@@ -74,7 +74,10 @@ let graph = null;
 let linkSel, nodeSel, labelSel, ringSel;
 let maxDepth = 1, rScale = d3.scaleSqrt(), strokeW = d3.scaleSqrt(), strokeO = d3.scaleSqrt();
 const radius = d => d.status === "root" ? Math.max(9, rScale(d.visits)) : rScale(d.visits);
-const ringOf = d => d.depth == null ? (maxDepth + 2) * RING : d.depth * RING;
+// a stable 0..1 number for a title, so the same article always lands in the same place
+const hash01 = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return ((h >>> 0) % 10000) / 10000; };
+// articles that never arrive sit in the outer band, spread between 90% and 100% of the "never arrives" ring
+const ringOf = d => d.depth == null ? (maxDepth + 2) * RING * (0.9 + 0.1 * hash01(d.title)) : d.depth * RING;
 let mix = 0.3, k = 1, topicsOn = false;
 let hovered = null, pinned = null;
 let autoFitDone = false, fitTimer = null;
@@ -90,13 +93,13 @@ const relevanceWeight = () => 2 * mix;
 export function initViz() {
   svg = d3.select("#viz");
   const defs = svg.append("defs");
-  d3.range(8).forEach(i => {   // soft colour haze for each topic
-    const g = defs.append("radialGradient").attr("id", "cloud-" + i);
-    g.append("stop").attr("offset", "0%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0.22);
+  d3.range(8).forEach(i => {   // a soft, low glow for each topic, drawn around each article
+    const g = defs.append("radialGradient").attr("id", "haze-" + i);
+    g.append("stop").attr("offset", "0%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0.09);
     g.append("stop").attr("offset", "100%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0);
   });
   world = svg.append("g");
-  gClouds = world.append("g");
+  gHaze = world.append("g");
   gRings = world.append("g");
   gLinks = world.append("g");
   gNodes = world.append("g");
@@ -115,10 +118,11 @@ export function initViz() {
     .alphaDecay(0.012);
   sim.on("tick", () => {
     if (mix < 0.05) clampToRings();
-    if (++tickN % 3 === 0 || sim.alpha() < 0.02) { drawRings(); drawClouds(); }
+    if (++tickN % 3 === 0 || sim.alpha() < 0.02) drawRings();
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
+    gHaze.selectAll("circle").attr("cx", d => d.x).attr("cy", d => d.y);
     labelSel.attr("x", d => d.x + radius(d) + 4 / k).attr("y", d => d.y);
   });
   sim.on("end.fit", () => { if (!autoFitDone) fitView(600); });
@@ -143,7 +147,7 @@ export function initViz() {
     mix = +e.target.value; applyMix(); sim.alpha(0.5).restart();
   });
   document.getElementById("topics").addEventListener("change", e => {
-    topicsOn = e.target.checked; paintTopics(); renderLegend(); drawClouds();
+    topicsOn = e.target.checked; paintTopics(); renderLegend();
   });
   document.getElementById("replay").addEventListener("click", toggleReplay);
   document.getElementById("export").addEventListener("click", exportPNG);
@@ -191,7 +195,7 @@ export const isReplaying = () => replaying;
 function applyMix() {
   sim.force("radial").strength(radialStrength());
   sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
-  gRings.attr("opacity", 1 - 0.4 * mix);                // rings stay visible, and bend to fit the layout
+  gRings.attr("opacity", Math.max(0, 1 - mix));          // rings fade out smoothly towards Relevance
 }
 
 function update(g, first) {
@@ -255,6 +259,9 @@ function update(g, first) {
     .join(enter => enter.append("circle").call(bindNode))
     .attr("class", d => `node ${d.status}${d.leaf && d.status === "reaches" ? " leaf" : ""}${fresh.has(d) && !first ? " fresh" : ""}`)
     .attr("r", radius);
+  const HAZE_R = 34;
+  gHaze.selectAll("circle").data(nodes.filter(d => d.status !== "root" && d.cluster >= 0), d => d.title).join("circle")
+    .attr("class", "haze").attr("r", HAZE_R).attr("fill", d => `url(#haze-${d.cluster % 8})`);
   if (!first && fresh.size) setTimeout(() => nodeSel.classed("fresh", false), 2500);
   paintTopics();
 
@@ -265,7 +272,6 @@ function update(g, first) {
     .attr("class", d => "label" + (d.status === "root" ? " root" : ""))
     .attr("dy", "0.35em").text(d => d.title);
   updateLabels();
-  drawClouds();
 
   sim.nodes(nodes);
   sim.force("link").links(links);
@@ -287,7 +293,6 @@ function updateLabels() {
   labelSel.attr("font-size", 11.5 / k).attr("stroke-width", 3 / k)
     .style("display", d => (d.status === "root" || d.rank < 14 * k * k) ? null : "none");
   ringSel.selectAll("text").attr("font-size", 10 / k).attr("stroke-width", 3 / k);
-  if (gClouds) gClouds.selectAll("text.cloud-label").attr("font-size", 14 / k);
 }
 
 /** Frame the whole tree inside the space the panels leave free. */
@@ -503,39 +508,65 @@ function toggleReplay() {
   })();
 }
 
-// ================================================================ rings that bend, clouds, clamp
+// ================================================================ rings that bend, clamp
 const BINS = 72;
+const bin = a => Math.floor(((a + Math.PI) / (2 * Math.PI)) * BINS) % BINS;
 const circlePath = r => `M${-r},0a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0Z`;
 
-/** Radius of one ring in each direction: a perfect circle at Tree rings, and the
- *  real positions of its articles at Relevance (blended in between). */
-function ringRadii(depth, r0) {
-  const buckets = Array.from({ length: BINS }, () => []);
-  for (const d of nodes) {
-    if (d.depth !== depth || d.x == null) continue;
-    const a = Math.atan2(d.y, d.x);
-    buckets[Math.floor(((a + Math.PI) / (2 * Math.PI)) * BINS) % BINS].push(Math.hypot(d.x, d.y));
-  }
-  const med = buckets.map(b => b.length ? d3.median(b) : null);
+/** Fill directions with no articles from their neighbours, then smooth around the circle. */
+function fillAndSmooth(med, fallback, k) {
   const out = med.map((v, i) => {
     if (v != null) return v;
-    let l = null, rr = null;
-    for (let o = 1; o < BINS && (l == null || rr == null); o++) {
+    let l = null, r = null;
+    for (let o = 1; o < BINS && (l == null || r == null); o++) {
       if (l == null) l = med[(i - o + BINS) % BINS];
-      if (rr == null) rr = med[(i + o) % BINS];
+      if (r == null) r = med[(i + o) % BINS];
     }
-    return l != null && rr != null ? (l + rr) / 2 : (l ?? rr ?? r0);
+    return l != null && r != null ? (l + r) / 2 : (l ?? r ?? fallback);
   });
-  const smooth = out.map((_, i) => (out[(i - 1 + BINS) % BINS] + 2 * out[i] + out[(i + 1) % BINS]) / 4);
-  return smooth.map(v => (1 - mix) * r0 + mix * v);
+  let arr = out;
+  for (let pass = 0; pass < 2; pass++) {       // two box blurs: a smooth, fluid outline
+    arr = arr.map((_, i) => {
+      let sum = 0;
+      for (let o = -k; o <= k; o++) sum += arr[(i + o + BINS * 4) % BINS];
+      return sum / (2 * k + 1);
+    });
+  }
+  return arr;
 }
 
+/** The outline of every ring, as a radius in each direction. Rings never cross: each
+ *  ring sits outside the one before it. */
+function ringShapes(depths) {
+  const ds = depths.slice().sort((a, b) => a - b);
+  const buckets = new Map(ds.map(d => [d, Array.from({ length: BINS }, () => [])]));
+  for (const d of nodes) {
+    if (d.depth == null || d.x == null || !buckets.has(d.depth)) continue;
+    buckets.get(d.depth)[bin(Math.atan2(d.y, d.x))].push(Math.hypot(d.x, d.y));
+  }
+  const shapes = new Map();
+  let prev = null;
+  for (const d of ds) {
+    let med = buckets.get(d).map(b => b.length ? d3.median(b) : null);
+    let shape = fillAndSmooth(med, d * RING, 4);
+    if (prev) shape = shape.map((v, i) => Math.max(v, prev[i] + RING * 0.3));
+    shapes.set(d, shape);
+    prev = shape;
+  }
+  return shapes;
+}
+
+/** Blend between perfect circles (Tree rings) and the real outline (towards Relevance). */
+const ease = t => t * t * (3 - 2 * t);
 function drawRings() {
   if (!ringSel || ringSel.empty()) return;
+  const t = ease(mix);
+  const shapes = ringShapes(ringSel.data().filter(d => !d.stranded).map(d => d.d));
   ringSel.each(function (d) {
     const g = d3.select(this);
     if (d.stranded) { g.select("path").attr("d", circlePath(d.r)); return; }
-    const radii = ringRadii(d.d, d.r);
+    const shape = shapes.get(d.d);
+    const radii = shape.map(v => (1 - t) * d.r + t * v);
     g.select("path").attr("d", radii.map((r, i) => {
       const a = (i + 0.5) * 2 * Math.PI / BINS - Math.PI;
       return (i ? "L" : "M") + (Math.cos(a) * r).toFixed(1) + "," + (Math.sin(a) * r).toFixed(1);
@@ -554,30 +585,6 @@ function clampToRings() {
     const r = Math.hypot(d.x, d.y);
     if (r > lim && r > 0) { const s = lim / r; d.x *= s; d.y *= s; }
   }
-}
-
-/** A faint haze over each topic's area, so you can see where the topics sit. */
-function drawClouds() {
-  if (!gClouds || !nodes.length) return;
-  const labels = current.analysis.clusterLabels || [];
-  const groups = new Map();
-  for (const d of nodes) {
-    if (d.status === "root" || d.cluster == null || d.cluster < 0 || d.x == null) continue;
-    if (!groups.has(d.cluster)) groups.set(d.cluster, []);
-    groups.get(d.cluster).push(d);
-  }
-  const data = [...groups].filter(([, a]) => a.length >= 3).map(([c, a]) => {
-    const cx = d3.mean(a, d => d.x), cy = d3.mean(a, d => d.y);
-    const spread = Math.sqrt(d3.mean(a, d => (d.x - cx) ** 2 + (d.y - cy) ** 2));
-    return { c, cx, cy, r: spread * 1.25 + 40, label: labels[c] || "" };
-  });
-  gClouds.selectAll("circle.cloud").data(data, d => d.c).join("circle")
-    .attr("class", "cloud").attr("cx", d => d.cx).attr("cy", d => d.cy).attr("r", d => d.r)
-    .attr("fill", d => `url(#cloud-${d.c % 8})`);
-  gClouds.selectAll("text.cloud-label").data(data, d => d.c).join("text")
-    .attr("class", "cloud-label").attr("x", d => d.cx).attr("y", d => d.cy - d.r * 0.6)
-    .attr("font-size", 14 / k).attr("fill", d => TOPIC_COLOURS[d.c % 8]).text(d => d.label)
-    .style("display", topicsOn ? null : "none");
 }
 
 // ================================================================ export

@@ -26,7 +26,7 @@
   #viz:active { cursor: grabbing; }
 
   /* ---------- graph */
-  .ring { fill: none; stroke: var(--ink); stroke-opacity: .045; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .ring { fill: none; stroke: var(--ink); stroke-opacity: .1; stroke-width: 1; vector-effect: non-scaling-stroke; }
   .ring.stranded { stroke-dasharray: 3 5; }
   .ring-label { fill: var(--muted); fill-opacity: .55; font-weight: 500; text-anchor: middle;
     paint-order: stroke; stroke: var(--bg); stroke-linejoin: round; }
@@ -161,6 +161,27 @@
   .tile b { display: block; font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .tile span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .card.wide { grid-column: 1 / -1; }
+  .big-number { font-size: 40px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.1; }
+  .card.rotd summary { list-style: none; cursor: pointer; }
+  .card.rotd summary::-webkit-details-marker { display: none; }
+  .card.rotd summary:hover h2 { color: var(--accent); }
+  .card.rotd details[open] summary { margin-bottom: 10px; }
+  .chart { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart .tick { fill: var(--muted); font-size: 11px; }
+  .chart .val { fill: var(--ink); font-size: 11px; font-weight: 600; }
+  .chart .bar-fill { fill: var(--ink); opacity: .55; }
+  .chart .axis text { fill: var(--muted); font-size: 11px; }
+  .chart .axis line { stroke: var(--rule); }
+  .chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .chart .area { fill: var(--accent); opacity: .12; }
+  .chart .donut-big { fill: var(--ink); font-size: 26px; font-weight: 650; }
+  .donut { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .donut svg { width: 160px; flex: none; }
+  .legend { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 150px; color: var(--muted); font-size: 12px; }
+  .legend li { display: flex; align-items: center; gap: 7px; margin: 5px 0; }
+  .legend i { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .legend b { margin-left: auto; color: var(--ink); font-variant-numeric: tabular-nums; }
   .card { border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; background: var(--panel); min-width: 0; }
   .card h2 { margin-bottom: 10px; }
   .card.feature { grid-column: 1 / -1; }
