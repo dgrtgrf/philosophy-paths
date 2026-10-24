@@ -16,7 +16,7 @@ async function db() {
 }
 
 const clean = r => ({
-  mode: r.mode, start: r.start, path: r.path, outcome: r.outcome, rescued: r.rescued || [],
+  mode: r.mode, start: r.start, path: r.path, outcome: r.outcome, rescued: r.rescued || [], author: r.author || null,
 });
 
 /** Most recent shared routes for a mode, oldest first. */
@@ -26,7 +26,7 @@ export async function loadRoutes(mode) {
   for (let from = 0; from < SHARED_ROUTE_LIMIT; from += 1000) {
     const to = Math.min(from + 999, SHARED_ROUTE_LIMIT - 1);
     const { data, error } = await c.from("routes")
-      .select("id, mode, start, path, outcome, rescued")
+      .select("id, mode, start, path, outcome, rescued, author")
       .eq("mode", mode).order("id", { ascending: false }).range(from, to);
     if (error) throw error;
     out.push(...data);

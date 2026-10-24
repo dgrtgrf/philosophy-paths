@@ -64,7 +64,7 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
 }
 
 // ================================================================ state
-let svg, world, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
+let svg, world, gClouds, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
 let nodes = [], links = [], springs = [];
 let byTitle = new Map();
 const slots = new Map();      // "mine" / "everyone" → { byTitle, autoFitDone, transform }
@@ -80,14 +80,23 @@ let hovered = null, pinned = null;
 let autoFitDone = false, fitTimer = null;
 function stopAutoFit() { autoFitDone = true; clearTimeout(fitTimer); fitTimer = null; }
 let replaying = false, replayTimer = null;
+let tickN = 0;
 
-const radialStrength = () => 0.02 + 0.5 * (1 - mix);
-const relevanceWeight = () => 0.3 + 1.7 * mix;
+// at Tree rings, only clicks decide position; at Relevance, only similarity does
+const radialStrength = () => 0.5 * (1 - mix);
+const relevanceWeight = () => 2 * mix;
 
 // ================================================================ public API
 export function initViz() {
   svg = d3.select("#viz");
+  const defs = svg.append("defs");
+  d3.range(8).forEach(i => {   // soft colour haze for each topic
+    const g = defs.append("radialGradient").attr("id", "cloud-" + i);
+    g.append("stop").attr("offset", "0%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0.22);
+    g.append("stop").attr("offset", "100%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0);
+  });
   world = svg.append("g");
+  gClouds = world.append("g");
   gRings = world.append("g");
   gLinks = world.append("g");
   gNodes = world.append("g");
@@ -105,6 +114,8 @@ export function initViz() {
     .force("radial", d3.forceRadial(d => ringOf(d), 0, 0))
     .alphaDecay(0.012);
   sim.on("tick", () => {
+    if (mix < 0.05) clampToRings();
+    if (++tickN % 3 === 0 || sim.alpha() < 0.02) { drawRings(); drawClouds(); }
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
@@ -132,7 +143,7 @@ export function initViz() {
     mix = +e.target.value; applyMix(); sim.alpha(0.5).restart();
   });
   document.getElementById("topics").addEventListener("change", e => {
-    topicsOn = e.target.checked; paintTopics(); renderLegend();
+    topicsOn = e.target.checked; paintTopics(); renderLegend(); drawClouds();
   });
   document.getElementById("replay").addEventListener("click", toggleReplay);
   document.getElementById("export").addEventListener("click", exportPNG);
@@ -180,7 +191,7 @@ export const isReplaying = () => replaying;
 function applyMix() {
   sim.force("radial").strength(radialStrength());
   sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
-  gRings.attr("opacity", Math.max(0, 1 - mix / 0.65));   // contour rings fade out towards Relevance
+  gRings.attr("opacity", 1 - 0.4 * mix);                // rings stay visible, and bend to fit the layout
 }
 
 function update(g, first) {
@@ -199,7 +210,7 @@ function update(g, first) {
   for (const d of [...nodes].reverse()) {
     if (!fresh.has(d)) continue;
     const anchor = d.next && byTitle.get(d.next);
-    if (anchor && anchor.x != null && anchor !== d) {
+    if (d.depth != null && anchor && anchor.x != null && anchor !== d) {   // stranded articles start on the never-arrives ring
       d.x = anchor.x + (Math.random() - 0.5) * 30; d.y = anchor.y + (Math.random() - 0.5) * 30;
     } else {
       const a = Math.random() * 2 * Math.PI, r = ringOf(d) || 0.001;
@@ -223,12 +234,12 @@ function update(g, first) {
     ringData.push({ d: "x", r: (maxDepth + 2) * RING, label: "never arrives", stranded: true });
   ringSel = gRings.selectAll("g").data(ringData, d => d.d).join(enter => {
     const gg = enter.append("g");
-    gg.append("circle");
+    gg.append("path");
     gg.append("text").attr("class", "ring-label top").attr("dy", "-0.4em");
     gg.append("text").attr("class", "ring-label bottom").attr("dy", "1.1em");
     return gg;
   });
-  ringSel.select("circle").attr("class", d => "ring" + (d.stranded ? " stranded" : "")).attr("r", d => d.r);
+  ringSel.select("path").attr("class", d => "ring" + (d.stranded ? " stranded" : ""));
   ringSel.select("text.top").attr("x", 0).attr("y", d => -d.r).text(d => d.label);
   ringSel.select("text.bottom").attr("x", 0).attr("y", d => d.r).text(d => d.label);
 
@@ -254,6 +265,7 @@ function update(g, first) {
     .attr("class", d => "label" + (d.status === "root" ? " root" : ""))
     .attr("dy", "0.35em").text(d => d.title);
   updateLabels();
+  drawClouds();
 
   sim.nodes(nodes);
   sim.force("link").links(links);
@@ -275,6 +287,7 @@ function updateLabels() {
   labelSel.attr("font-size", 11.5 / k).attr("stroke-width", 3 / k)
     .style("display", d => (d.status === "root" || d.rank < 14 * k * k) ? null : "none");
   ringSel.selectAll("text").attr("font-size", 10 / k).attr("stroke-width", 3 / k);
+  if (gClouds) gClouds.selectAll("text.cloud-label").attr("font-size", 14 / k);
 }
 
 /** Frame the whole tree inside the space the panels leave free. */
@@ -315,6 +328,7 @@ function renderHeader() {
 
 function renderSide() {
   const side = document.getElementById("side");
+  document.body.classList.toggle("has-pin", !!pinned);
   if (pinned) { side.innerHTML = pinnedHTML(pinned); wireSide(side); return; }
   const s = graph.stats;
   const busiest = graph.nodes.filter(n => n.status !== "root").slice(0, 8);
@@ -355,6 +369,11 @@ function pinnedHTML(d) {
       list.slice(0, 12).map(([t, n]) => `<div class="row" data-t="${esc(t)}"><span>${esc(t)}</span><b>${n > 1 ? "×" + n : ""}</b></div>`).join("") +
       (list.length > 12 ? `<div class="sub" style="margin:6px 0 0">+ ${list.length - 12} more</div>` : "") + `</div>`;
   }
+  const by = new Map();
+  for (const r of graph.routes) if (r.author && r.path.includes(d.title)) by.set(r.author, (by.get(r.author) || 0) + 1);
+  if (by.size)
+    html += `<div class="section"><h2>Routes through here by</h2><div class="sub" style="margin:0">` +
+      [...by].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([n, c]) => esc(n) + (c > 1 ? ` ×${c}` : "")).join(" · ") + `</div></div>`;
   html += `<a class="wiki" target="_blank" rel="noopener" href="${wikiURL(d.title)}">Open on Wikipedia ↗</a>`;
   return html;
 }
@@ -482,6 +501,83 @@ function toggleReplay() {
     if (n >= current.routes.length) { stopReplay(); renderHeader(); return; }
     replayTimer = setTimeout(tick, step);
   })();
+}
+
+// ================================================================ rings that bend, clouds, clamp
+const BINS = 72;
+const circlePath = r => `M${-r},0a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0Z`;
+
+/** Radius of one ring in each direction: a perfect circle at Tree rings, and the
+ *  real positions of its articles at Relevance (blended in between). */
+function ringRadii(depth, r0) {
+  const buckets = Array.from({ length: BINS }, () => []);
+  for (const d of nodes) {
+    if (d.depth !== depth || d.x == null) continue;
+    const a = Math.atan2(d.y, d.x);
+    buckets[Math.floor(((a + Math.PI) / (2 * Math.PI)) * BINS) % BINS].push(Math.hypot(d.x, d.y));
+  }
+  const med = buckets.map(b => b.length ? d3.median(b) : null);
+  const out = med.map((v, i) => {
+    if (v != null) return v;
+    let l = null, rr = null;
+    for (let o = 1; o < BINS && (l == null || rr == null); o++) {
+      if (l == null) l = med[(i - o + BINS) % BINS];
+      if (rr == null) rr = med[(i + o) % BINS];
+    }
+    return l != null && rr != null ? (l + rr) / 2 : (l ?? rr ?? r0);
+  });
+  const smooth = out.map((_, i) => (out[(i - 1 + BINS) % BINS] + 2 * out[i] + out[(i + 1) % BINS]) / 4);
+  return smooth.map(v => (1 - mix) * r0 + mix * v);
+}
+
+function drawRings() {
+  if (!ringSel || ringSel.empty()) return;
+  ringSel.each(function (d) {
+    const g = d3.select(this);
+    if (d.stranded) { g.select("path").attr("d", circlePath(d.r)); return; }
+    const radii = ringRadii(d.d, d.r);
+    g.select("path").attr("d", radii.map((r, i) => {
+      const a = (i + 0.5) * 2 * Math.PI / BINS - Math.PI;
+      return (i ? "L" : "M") + (Math.cos(a) * r).toFixed(1) + "," + (Math.sin(a) * r).toFixed(1);
+    }).join("") + "Z");
+    g.select("text.top").attr("y", -radii[Math.round(BINS / 4 - 0.5)]);
+    g.select("text.bottom").attr("y", radii[Math.round(3 * BINS / 4 - 0.5)]);
+  });
+}
+
+/** Articles that never reach Philosophy stay inside the "never arrives" ring at Tree rings. */
+function clampToRings() {
+  const R = (maxDepth + 2) * RING;
+  for (const d of nodes) {
+    if (d.fx != null || d.x == null) continue;
+    const lim = d.depth == null ? R - radius(d) : R;
+    const r = Math.hypot(d.x, d.y);
+    if (r > lim && r > 0) { const s = lim / r; d.x *= s; d.y *= s; }
+  }
+}
+
+/** A faint haze over each topic's area, so you can see where the topics sit. */
+function drawClouds() {
+  if (!gClouds || !nodes.length) return;
+  const labels = current.analysis.clusterLabels || [];
+  const groups = new Map();
+  for (const d of nodes) {
+    if (d.status === "root" || d.cluster == null || d.cluster < 0 || d.x == null) continue;
+    if (!groups.has(d.cluster)) groups.set(d.cluster, []);
+    groups.get(d.cluster).push(d);
+  }
+  const data = [...groups].filter(([, a]) => a.length >= 3).map(([c, a]) => {
+    const cx = d3.mean(a, d => d.x), cy = d3.mean(a, d => d.y);
+    const spread = Math.sqrt(d3.mean(a, d => (d.x - cx) ** 2 + (d.y - cy) ** 2));
+    return { c, cx, cy, r: spread * 1.25 + 40, label: labels[c] || "" };
+  });
+  gClouds.selectAll("circle.cloud").data(data, d => d.c).join("circle")
+    .attr("class", "cloud").attr("cx", d => d.cx).attr("cy", d => d.cy).attr("r", d => d.r)
+    .attr("fill", d => `url(#cloud-${d.c % 8})`);
+  gClouds.selectAll("text.cloud-label").data(data, d => d.c).join("text")
+    .attr("class", "cloud-label").attr("x", d => d.cx).attr("y", d => d.cy - d.r * 0.6)
+    .attr("font-size", 14 / k).attr("fill", d => TOPIC_COLOURS[d.c % 8]).text(d => d.label)
+    .style("display", topicsOn ? null : "none");
 }
 
 // ================================================================ export

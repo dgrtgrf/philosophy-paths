@@ -1,20 +1,22 @@
-// app.js — wires the crawler, the shared tree and the drawing together.
+// app.js — wires the crawler, the shared tree, the drawing and the stats page together.
 
 import { Crawler } from "./crawler.js";
 import { initViz, setData, resetSlot, esc, plural } from "./viz.js";
+import { statsHTML } from "./stats.js";
 import * as shared from "./shared.js";
 
 const $ = id => document.getElementById(id);
 const MODE_NAMES = { classic: "Classic rules", smart: "Smart rules" };
+const MAX_ROUTES = 500;
 
 const state = {
-  tab: "mine",
+  tab: "mine",                      // "mine" | "everyone" | "stats"
   mode: "classic",
-  mine: { routes: [], mode: "classic", running: false, total: 0, status: "", statusKind: "" },
+  mine: { routes: [], live: null, mode: "classic", running: false, total: 0, status: "", statusKind: "" },
   everyone: { classic: null, smart: null, loading: false, error: null },
-  analysis: {},          // slot → result from the similarity worker
+  analysis: {},                     // slot → result from the similarity worker
 };
-const texts = new Map(); // title → intro text, from our own crawling and from the shared table
+const texts = new Map();            // title → intro text, from our own crawling and from the shared table
 
 const crawler = new Crawler({
   onWait: secs => setMineStatus(`Wikipedia asked us to slow down — waiting ${secs}s`, "warn"),
@@ -54,16 +56,28 @@ const analyseSoon = (() => {
 // ─────────────────────────────────────────────── what's on screen ──
 const currentSlot = () => state.tab === "mine" ? "mine" : `everyone-${state.mode}`;
 function routesFor(slot) {
-  if (slot === "mine") return state.mine.routes;
+  if (slot === "mine") return state.mine.live ? [...state.mine.routes, state.mine.live] : state.mine.routes;
   return state.everyone[slot.split("-")[1]] || [];
 }
 
 function render() {
+  if (state.tab === "stats") { renderStatsPage(); renderChrome(); return; }
   const slot = currentSlot();
   const mode = state.tab === "mine" ? state.mine.mode : state.mode;
   const subtitle = state.tab === "mine" ? `My tree · ${MODE_NAMES[mode]}` : `Everyone's tree · ${MODE_NAMES[mode]}`;
   setData(slot, { routes: routesFor(slot), mode, analysis: state.analysis[slot], subtitle });
   renderChrome();
+}
+
+function renderStatsPage() {
+  const mode = state.mode;
+  const a = state.analysis[`everyone-${mode}`] || {};
+  $("page").innerHTML = statsHTML({
+    routes: state.everyone[mode] || [], texts,
+    clusterOf: new Map(Object.entries(a.clusters || {})), labels: a.clusterLabels || [],
+    mode, loading: state.everyone.loading, error: state.everyone.error,
+    date: new Date().toISOString().slice(0, 10),
+  });
 }
 
 function renderChrome() {
@@ -78,11 +92,14 @@ function renderChrome() {
   $("go").classList.toggle("stop", state.mine.running);
   $("shareBox").style.display = shared.sharedEnabled() ? "" : "none";
   $("tabs").style.display = shared.sharedEnabled() ? "" : "none";
+  document.body.classList.toggle("stats", state.tab === "stats");
+  $("page").hidden = state.tab !== "stats";
 
   // status line
   const st = $("status");
   let text = "", kind = "";
   if (state.tab === "mine") { text = state.mine.status; kind = state.mine.statusKind; }
+  else if (state.tab === "stats") { text = ""; }
   else if (state.everyone.error) { text = state.everyone.error; kind = "err"; }
   else if (state.everyone.loading) { text = "Loading everyone's routes…"; kind = ""; }
   else { const n = routesFor(currentSlot()).length; text = `Live · updates as people crawl`; kind = n ? "live" : ""; }
@@ -91,7 +108,8 @@ function renderChrome() {
 
   // empty state
   const empty = $("empty");
-  if (routesFor(currentSlot()).length) empty.innerHTML = "";
+  if (state.tab === "stats") empty.innerHTML = "";
+  else if (routesFor(currentSlot()).length) empty.innerHTML = "";
   else if (state.tab === "mine")
     empty.innerHTML = state.mine.running
       ? `<div><b>Following first links…</b>Your first route appears here as soon as it's done.</div>`
@@ -107,14 +125,21 @@ function setMineStatus(text, kind = "") {
 }
 
 // ─────────────────────────────────────────────── crawling ──
+function readCount() {
+  const v = Math.round(+$("count").value || 25);
+  return Math.min(MAX_ROUTES, Math.max(1, v));
+}
+
 async function start() {
   const mode = state.mode;
   const startFrom = $("startFrom").value.split(",").map(s => s.trim()).filter(Boolean);
-  const n = startFrom.length || +$("count").value;
+  const n = startFrom.length || readCount();
   const share = shared.sharedEnabled() && $("share").checked;
+  const author = $("name").value.trim().slice(0, 30);
+  try { localStorage.setItem("pp_name", author); } catch (e) { /* private window: fine */ }
 
   // every run starts a fresh tree
-  state.mine = { routes: [], mode, running: true, total: n, status: "", statusKind: "live" };
+  state.mine = { routes: [], live: null, mode, running: true, total: n, status: "", statusKind: "live" };
   delete state.analysis.mine;
   resetSlot("mine");
   render();
@@ -125,7 +150,14 @@ async function start() {
     const how = await crawler.run({
       mode, n, starts: startFrom,
       onStarts: list => { state.mine.total = list.length; setMineStatus(`Crawling · route 1 of ${list.length}`, "live"); },
+      onStep: path => {   // the route appears on screen while it is being followed
+        state.mine.live = { start: path[0], path: [...path], outcome: "walking", rescued: [], mode, author };
+        if (state.tab === "mine") render();
+        analyseSoon("mine");
+      },
       onRoute: async route => {
+        state.mine.live = null;
+        route.author = author;
         state.mine.routes.push(route);
         for (const t of route.path) if (!texts.has(t) && crawler.textOf(t)) texts.set(t, crawler.textOf(t));
         const done = state.mine.routes.length;
@@ -137,12 +169,14 @@ async function start() {
         });
       },
     });
+    state.mine.live = null;
     const done = state.mine.routes.length;
     const reached = state.mine.routes.filter(r => r.outcome === "philosophy").length;
     setMineStatus(how === "stopped"
       ? `Stopped · ${plural(done, "route")}`
       : `Finished · ${reached} of ${done} reached Philosophy${shareFailed ? " · sharing failed" : ""}`);
   } catch (err) {
+    state.mine.live = null;
     setMineStatus(err.message || "Something went wrong.", "err");
   } finally {
     state.mine.running = false;
@@ -154,8 +188,10 @@ async function start() {
 $("go").addEventListener("click", () => state.mine.running ? crawler.stop() : start());
 $("startFrom").addEventListener("keydown", e => { if (e.key === "Enter" && !state.mine.running) start(); });
 window.addEventListener("beforeunload", e => { if (state.mine.running) { e.preventDefault(); e.returnValue = ""; } });
+$("more").addEventListener("click", () => $("controls").classList.toggle("open"));
+try { $("name").value = localStorage.getItem("pp_name") || ""; } catch (e) { /* ignore */ }
 
-// ─────────────────────────────────────────────── everyone's tree ──
+// ─────────────────────────────────────────────── everyone's tree and stats ──
 let subscribed = false;
 const pendingTitles = new Set();
 const fetchTextsSoon = (() => {
@@ -174,22 +210,28 @@ const fetchTextsSoon = (() => {
     }, 2000);
   };
 })();
+const scheduleStats = (() => {
+  let t;
+  return () => { clearTimeout(t); t = setTimeout(() => { if (state.tab === "stats") renderStatsPage(); }, 1500); };
+})();
 
-async function openEveryone() {
-  const mode = state.mode;
-  if (!subscribed) {
-    subscribed = true;
-    shared.subscribe(route => {
-      const list = state.everyone[route.mode];
-      if (!list) return;                         // not loaded yet; we'll get it on load
-      list.push(route);
-      route.path.forEach(t => pendingTitles.add(t));
-      fetchTextsSoon();
-      analyseSoon(`everyone-${route.mode}`);
-      if (currentSlot() === `everyone-${route.mode}`) render();
-    }).catch(e => console.warn("Live updates unavailable:", e));
-  }
-  if (state.everyone[mode]) { render(); return; }
+function subscribeOnce() {
+  if (subscribed) return;
+  subscribed = true;
+  shared.subscribe(route => {
+    const list = state.everyone[route.mode];
+    if (!list) return;                         // not loaded yet; we'll get it on load
+    list.push(route);
+    route.path.forEach(t => pendingTitles.add(t));
+    fetchTextsSoon();
+    analyseSoon(`everyone-${route.mode}`);
+    if (currentSlot() === `everyone-${route.mode}`) render();
+    if (state.tab === "stats" && route.mode === state.mode) scheduleStats();
+  }).catch(e => console.warn("Live updates unavailable:", e));
+}
+
+async function loadEveryone(mode) {
+  if (state.everyone[mode]) return;
   state.everyone.loading = true; state.everyone.error = null;
   render();
   try {
@@ -205,19 +247,33 @@ async function openEveryone() {
     state.everyone.loading = false;
   }
   analyse(`everyone-${mode}`);
-  if (state.tab === "everyone") render();
+  render();
+}
+
+async function openEveryone() {
+  subscribeOnce();
+  if (state.everyone[state.mode]) { render(); return; }
+  await loadEveryone(state.mode);
+}
+async function openStats() {
+  subscribeOnce();
+  if (state.everyone[state.mode]) { render(); return; }
+  await loadEveryone(state.mode);
 }
 
 // ─────────────────────────────────────────────── tabs and rules ──
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => {
   if (state.tab === b.dataset.tab) return;
   state.tab = b.dataset.tab;
-  if (state.tab === "everyone") openEveryone(); else render();
+  if (state.tab === "everyone") openEveryone();
+  else if (state.tab === "stats") openStats();
+  else render();
 });
 document.querySelectorAll("#modes button").forEach(b => b.onclick = () => {
   if (b.disabled || state.mode === b.dataset.mode) return;
   state.mode = b.dataset.mode;
   if (state.tab === "everyone") openEveryone();
+  else if (state.tab === "stats") openStats();
   else {
     // the rules apply to your next run; an existing tree keeps its own rules
     if (!state.mine.routes.length) state.mine.mode = state.mode;

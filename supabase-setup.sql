@@ -43,3 +43,7 @@ begin
     alter publication supabase_realtime add table public.routes;
   end if;
 end $$;
+
+-- Optional names on routes (run this once; safe to run again)
+alter table public.routes add column if not exists author text
+  check (author is null or char_length(author) between 1 and 30);

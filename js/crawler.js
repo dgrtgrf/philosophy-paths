@@ -262,7 +262,7 @@ export class Crawler {
   }
 
   /** → { start, path, outcome, rescued, mode } */
-  async follow(start, mode, maxSteps = 80) {
+  async follow(start, mode, maxSteps = 80, onStep) {
     const path = [], seen = new Set(), rescued = [];
     let title = start;
     const done = outcome => ({ start, path, outcome, rescued, mode });
@@ -271,6 +271,7 @@ export class Crawler {
       if (!canon) return done("missing");
       if (seen.has(canon)) { path.push(canon); return done("loop"); }
       path.push(canon); seen.add(canon);
+      onStep?.(path);
       if (canon === TARGET) return done("philosophy");
       const next = mode === "smart" ? entry.smart.next : entry.next;
       const wasRescued = mode === "smart" && entry.smart.rescued;
@@ -285,13 +286,13 @@ export class Crawler {
    * Crawl n random articles (or the given starts), calling onRoute(route) after each.
    * Resolves when finished or stopped; stop() ends it early.
    */
-  async run({ mode, n, starts, onRoute, onStarts }) {
+  async run({ mode, n, starts, onRoute, onStarts, onStep }) {
     this.controller = new AbortController();
     try {
       const list = starts?.length ? starts : await this.randomTitles(n);
       onStarts?.(list);
       for (const s of list) {
-        const route = await this.follow(s, mode);
+        const route = await this.follow(s, mode, 80, onStep);
         if (route.path.length) await onRoute(route);
       }
       return "finished";
