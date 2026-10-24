@@ -64,7 +64,7 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
 }
 
 // ================================================================ state
-let svg, world, gHaze, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
+let svg, world, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
 let nodes = [], links = [], springs = [];
 let byTitle = new Map();
 const slots = new Map();      // "mine" / "everyone" → { byTitle, autoFitDone, transform }
@@ -76,8 +76,8 @@ let maxDepth = 1, rScale = d3.scaleSqrt(), strokeW = d3.scaleSqrt(), strokeO = d
 const radius = d => d.status === "root" ? Math.max(9, rScale(d.visits)) : rScale(d.visits);
 // a stable 0..1 number for a title, so the same article always lands in the same place
 const hash01 = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return ((h >>> 0) % 10000) / 10000; };
-// articles that never arrive sit in the outer band, spread between 90% and 100% of the "never arrives" ring
-const ringOf = d => d.depth == null ? (maxDepth + 2) * RING * (0.9 + 0.1 * hash01(d.title)) : d.depth * RING;
+// articles that never arrive sit just outside the "never arrives" ring, spread across a band beyond it
+const ringOf = d => d.depth == null ? (maxDepth + 2) * RING * (1.04 + 0.16 * hash01(d.title)) : d.depth * RING;
 let mix = 0.3, k = 1, topicsOn = false;
 let hovered = null, pinned = null;
 let autoFitDone = false, fitTimer = null;
@@ -92,14 +92,7 @@ const relevanceWeight = () => 2 * mix;
 // ================================================================ public API
 export function initViz() {
   svg = d3.select("#viz");
-  const defs = svg.append("defs");
-  d3.range(8).forEach(i => {   // a soft, low glow for each topic, drawn around each article
-    const g = defs.append("radialGradient").attr("id", "haze-" + i);
-    g.append("stop").attr("offset", "0%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0.09);
-    g.append("stop").attr("offset", "100%").attr("stop-color", TOPIC_COLOURS[i]).attr("stop-opacity", 0);
-  });
   world = svg.append("g");
-  gHaze = world.append("g");
   gRings = world.append("g");
   gLinks = world.append("g");
   gNodes = world.append("g");
@@ -122,7 +115,6 @@ export function initViz() {
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
-    gHaze.selectAll("circle").attr("cx", d => d.x).attr("cy", d => d.y);
     labelSel.attr("x", d => d.x + radius(d) + 4 / k).attr("y", d => d.y);
   });
   sim.on("end.fit", () => { if (!autoFitDone) fitView(600); });
@@ -259,9 +251,6 @@ function update(g, first) {
     .join(enter => enter.append("circle").call(bindNode))
     .attr("class", d => `node ${d.status}${d.leaf && d.status === "reaches" ? " leaf" : ""}${fresh.has(d) && !first ? " fresh" : ""}`)
     .attr("r", radius);
-  const HAZE_R = 34;
-  gHaze.selectAll("circle").data(nodes.filter(d => d.status !== "root" && d.cluster >= 0), d => d.title).join("circle")
-    .attr("class", "haze").attr("r", HAZE_R).attr("fill", d => `url(#haze-${d.cluster % 8})`);
   if (!first && fresh.size) setTimeout(() => nodeSel.classed("fresh", false), 2500);
   paintTopics();
 
@@ -581,7 +570,7 @@ function clampToRings() {
   const R = (maxDepth + 2) * RING;
   for (const d of nodes) {
     if (d.fx != null || d.x == null) continue;
-    const lim = d.depth == null ? R - radius(d) : R;
+    const lim = d.depth == null ? R * 1.2 : R;
     const r = Math.hypot(d.x, d.y);
     if (r > lim && r > 0) { const s = lim / r; d.x *= s; d.y *= s; }
   }
