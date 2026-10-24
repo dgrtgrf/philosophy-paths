@@ -145,8 +145,8 @@ export function initViz() {
     if (e.buttons) return;   // dragging or panning
     const d = nearestNode(e);
     if (d === hovered) { if (d) placeTip(e.clientX, e.clientY); return; }
-    if (d) { hovered = d; trailAdd(d); if (!pinned) paintTrail(); showTip(d); placeTip(e.clientX, e.clientY); }
-    else { hovered = null; tip.style.opacity = 0; }
+    if (d) { showHover(d); placeTip(e.clientX, e.clientY); }
+    else hideHover();
   });
 
   document.getElementById("mix").addEventListener("input", e => {
@@ -303,7 +303,7 @@ function update(g, first) {
 
 function updateLabels() {
   labelSel.attr("font-size", 11.5 / k).attr("stroke-width", 3 / k)
-    .style("display", d => (d.status === "root" || d.rank < 14 * k * k) ? null : "none");
+    .style("display", d => !hiddenNode(d) && (d.status === "root" || d.rank < 14 * k * k) ? null : "none");
   ringSel.selectAll("text").attr("font-size", 10 / k).attr("stroke-width", 3 / k);
 }
 
@@ -400,16 +400,17 @@ function wireSide(side) {
   const c = side.querySelector(".close"); if (c) c.onclick = unpin;
 }
 
-/** Legend entries can be switched off; hidden groups disappear from the map. */
-const hidden = new Set();
+/** Legend entries pick what is shown. With nothing picked, everything shows; picking some hides the rest. */
+const picked = new Set();
+const isHidden = key => picked.size > 0 && !picked.has(key);
 const catOf = d => d.status === "stranded" ? "stranded" : (topicsOn && d.cluster >= 0 ? "topic:" + d.cluster : "reaches");
-const hiddenNode = d => d.status !== "root" && hidden.has(catOf(d));
+const hiddenNode = d => d.status !== "root" && isHidden(catOf(d));
 function applyHidden() {
   nodeSel.style("display", d => hiddenNode(d) ? "none" : null);
-  labelSel.style("display", d => hiddenNode(d) ? "none" : null);
+  updateLabels();
   linkSel.style("display", l => {
     const s = typeof l.source === "object" ? l.source : null, t = typeof l.target === "object" ? l.target : null;
-    const gone = (s && hiddenNode(s)) || (t && hiddenNode(t)) || (hidden.has("rescued") && l.rescued);
+    const gone = (s && hiddenNode(s)) || (t && hiddenNode(t)) || (isHidden("rescued") && l.rescued);
     return gone ? "none" : null;
   });
 }
@@ -417,14 +418,15 @@ function toggleLegend(e) {
   const el = e.target.closest("[data-k]");
   if (!el) return;
   const k = el.dataset.k;
-  hidden.has(k) ? hidden.delete(k) : hidden.add(k);
+  picked.has(k) ? picked.delete(k) : picked.add(k);
   applyHidden();
   renderLegend();
 }
 
 function renderLegend() {
   const sw = (inner, w = 12) => `<span class="sw"><svg width="${w}" height="12">${inner}</svg></span>`;
-  const item = (key, inner, text) => `<div data-k="${key}" class="${hidden.has(key) ? "off" : ""}">${inner}${text}</div>`;
+  const keys = [];
+  const item = (key, inner, text) => { keys.push(key); return `<div data-k="${key}" class="${isHidden(key) ? "off" : ""}">${inner}${text}</div>`; };
   let html = `<div>${sw('<circle cx="6" cy="6" r="5" fill="var(--accent)"/>')}Philosophy</div>`;
   const labels = current.analysis.clusterLabels || [];
   if (topicsOn && labels.length) {
@@ -440,6 +442,8 @@ function renderLegend() {
   html += `<div>${line("var(--ink)")}Thicker = more routes</div>`;
   if (graph.links.some(l => l.rescued)) html += item("rescued", line("var(--ink)", 'stroke-dasharray="4 4"'), "Rescued by smart rules");
   html += `<div class="hint">Scroll to zoom · F to re-frame · Esc to unpin</div>`;
+  // forget picks for groups that no longer exist, so the map can't end up empty
+  for (const k of [...picked]) if (!keys.includes(k)) picked.delete(k);
   for (const id of ["legend", "legendMobile"]) { const el = document.getElementById(id); el.innerHTML = html; el.onclick = toggleLegend; }
 }
 
@@ -459,9 +463,9 @@ function bindNode(sel) {
       if (!e.active) sim.alphaTarget(0);
       if (d.status !== "root") { d.fx = null; d.fy = null; }
     }))
-    .on("mouseenter", (e, d) => { stopAutoFit(); hovered = d; trailAdd(d); if (!pinned) paintTrail(); showTip(d); placeTip(e.clientX, e.clientY); })
+    .on("mouseenter", (e, d) => { stopAutoFit(); showHover(d); placeTip(e.clientX, e.clientY); })
     .on("mousemove", e => placeTip(e.clientX, e.clientY))
-    .on("mouseleave", () => { hovered = null; tip.style.opacity = 0; })
+    .on("mouseleave", () => hideHover())
     .on("click", (e, d) => { if (e.defaultPrevented) return; e.stopPropagation(); pin(d); })
     .on("dblclick", (e, d) => { e.stopPropagation(); window.open(wikiURL(d.title), "_blank"); });
 }
@@ -487,8 +491,20 @@ function highlight(d) {
   labelSel.classed("hl", n => onRoute.has(n.title));
   linkSel.classed("hl", l => hops.has(l.source.title + "\t" + l.target.title));
 }
-/** Hovered paths stay lit as the pointer moves, so sweeping across the map lights up many routes. */
+/** Only the path under the pointer is lit; it goes as soon as the pointer is off the node. */
 const trail = { nodes: new Set(), hops: new Set() };
+function showHover(d) {
+  hovered = d;
+  clearTrail(); trailAdd(d);
+  if (!pinned) paintTrail();
+  showTip(d);
+}
+function hideHover() {
+  hovered = null;
+  tip.style.opacity = 0;
+  clearTrail();
+  if (!pinned) clearHighlight();
+}
 function trailAdd(d) {
   const route = routeFrom(d);
   for (const n of route) trail.nodes.add(n.title);
@@ -533,7 +549,11 @@ function placeTip(x, y) {
   tip.style.top = Math.min(y + 16, innerHeight - h - 12) + "px";
 }
 function pin(d) { pinned = d; highlight(d); renderSide(); }
-function unpin() { pinned = null; clearHighlight(); if (trail.nodes.size) paintTrail(); renderSide(); }
+function unpin() {
+  pinned = null; clearHighlight(); clearTrail();
+  if (hovered) { trailAdd(hovered); paintTrail(); }
+  renderSide();
+}
 
 function focusOn(d) {
   if (!d) return;
