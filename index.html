@@ -217,7 +217,7 @@
     #controls.open #extras { display: block; margin-top: 10px; }
     #controls.open #extras input[type=search] { margin-top: 10px; }
     #side, #legend { display: none; }
-    body.has-pin #controls { display: none; }
+    body.has-pin #controls { z-index: 6; }   /* stays reachable while a node is pinned */
     body.has-pin #side { display: block; top: auto; right: 10px; left: 10px; bottom: 10px; width: auto;
       max-height: 52vh; }
     #empty { padding: 0 24px; }

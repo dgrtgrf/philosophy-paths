@@ -30,7 +30,7 @@ function stem(w) {
 
 function tokens(text) {
   return (text.toLowerCase().match(/[a-z][a-z0-9]+/g) || [])
-    .filter(w => !STOP.has(w) && !/^\d+$/.test(w)).map(stem);
+    .filter(w => !STOP.has(w) && !/^\d+$/.test(w));
 }
 
 /**
@@ -49,12 +49,13 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
   const index = new Map(titles.map((t, i) => [t, i]));
 
   // term frequencies
-  const vocab = new Map(), terms = [];
+  const vocab = new Map(), terms = [], shown = [];   // terms: stems; shown: a readable word for each
   const tfs = titles.map(t => {
     const counts = new Map();
-    for (const w of tokens(`${t}. ${t}. ${textOf(t) || ""}`)) {
+    for (const raw of tokens(`${t}. ${t}. ${textOf(t) || ""}`)) {
+      const w = stem(raw);
       let id = vocab.get(w);
-      if (id === undefined) { id = terms.length; vocab.set(w, id); terms.push(w); }
+      if (id === undefined) { id = terms.length; vocab.set(w, id); terms.push(w); shown.push(raw); }
       counts.set(id, (counts.get(id) || 0) + 1);
     }
     return counts;
@@ -142,44 +143,108 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
     }
   }
 
-  // topic groups (k-means on the same vectors)
+  // topic groups: k-means, with the number of groups chosen by silhouette score (3 to 12).
+  // With meaning vectors, groups follow meaning; otherwise word overlap. Labels are the words
+  // most specific to each group, so they change as the articles change.
   let clusters = {}, clusterLabels = [];
   if (n >= 8) {
-    const K = Math.min(8, Math.max(3, Math.round(Math.sqrt(n / 6))));
-    // steady start: the busiest article, then repeatedly the one least like any chosen centre
-    const seeds = [0];
-    const closest = docs.map(d => dot(d, docs[0]));
-    while (seeds.length < K) {
-      let far = -1, farVal = Infinity;
-      for (let i = 0; i < n; i++) if (!seeds.includes(i) && closest[i] < farVal) { farVal = closest[i]; far = i; }
-      if (far < 0) break;
-      seeds.push(far);
-      docs.forEach((d, i) => { closest[i] = Math.max(closest[i], dot(d, docs[far])); });
-    }
-    let centres = seeds.map(s => new Map(docs[s]));
-    let assign = new Int32Array(n);
-    for (let iter = 0; iter < 10; iter++) {
-      const norms = centres.map(c => { let s = 0; for (const w of c.values()) s += w * w; return Math.sqrt(s) || 1; });
-      let changed = false;
-      for (let i = 0; i < n; i++) {
-        let bestC = 0, bestS = -1;
-        for (let c = 0; c < centres.length; c++) {
-          const s = dot(docs[i], centres[c]) / norms[c];
-          if (s > bestS) { bestS = s; bestC = c; }
+    const dense = !!vectors, dim = dense ? vectors[0].length : 0;
+    const pts = dense ? vectors : docs;
+    const dotP = dense
+      ? (x, y) => { let v = 0; for (let k = 0; k < dim; k++) v += x[k] * y[k]; return v; }
+      : dot;
+    const zero = () => (dense ? new Float32Array(dim) : new Map());
+    const copy = p => (dense ? Float32Array.from(p) : new Map(p));
+    const addTo = (c, p, w) => {
+      if (dense) { for (let k = 0; k < dim; k++) c[k] += w * p[k]; }
+      else for (const [id, v] of p) c.set(id, (c.get(id) || 0) + w * v);
+    };
+    const scale = (c, f) => {
+      if (dense) { for (let k = 0; k < dim; k++) c[k] *= f; }
+      else for (const [id, v] of c) c.set(id, v * f);
+    };
+
+    function kmeans(K) {
+      // steady start: the busiest article, then repeatedly the one least like any chosen centre
+      const seeds = [0];
+      const closest = pts.map(p => dotP(p, pts[0]));
+      while (seeds.length < K) {
+        let far = -1, farVal = Infinity;
+        for (let i = 0; i < n; i++) if (!seeds.includes(i) && closest[i] < farVal) { farVal = closest[i]; far = i; }
+        if (far < 0) break;
+        seeds.push(far);
+        pts.forEach((p, i) => { closest[i] = Math.max(closest[i], dotP(p, pts[far])); });
+      }
+      let centres = seeds.map(s => copy(pts[s]));
+      const assign = new Int32Array(n);
+      for (let iter = 0; iter < 12; iter++) {
+        const norms = centres.map(c => Math.sqrt(dotP(c, c)) || 1);
+        let changed = false;
+        for (let i = 0; i < n; i++) {
+          let bestC = 0, bestS = -Infinity;
+          for (let c = 0; c < centres.length; c++) {
+            const s = dotP(pts[i], centres[c]) / norms[c];
+            if (s > bestS) { bestS = s; bestC = c; }
+          }
+          if (assign[i] !== bestC) { changed = true; assign[i] = bestC; }
         }
-        if (assign[i] !== bestC || iter === 0) { changed = changed || assign[i] !== bestC; assign[i] = bestC; }
+        const next = centres.map(zero), sizes = new Array(centres.length).fill(0);
+        for (let i = 0; i < n; i++) { sizes[assign[i]]++; addTo(next[assign[i]], pts[i], 1); }
+        next.forEach((c, k) => { if (sizes[k]) scale(c, 1 / sizes[k]); else next[k] = centres[k]; });
+        centres = next;
+        if (!changed && iter > 0) break;
       }
-      const next = centres.map(() => new Map()), sizes = new Array(centres.length).fill(0);
-      for (let i = 0; i < n; i++) {
-        const c = assign[i]; sizes[c]++;
-        for (const [id, w] of docs[i]) next[c].set(id, (next[c].get(id) || 0) + w);
-      }
-      next.forEach((m, c) => { if (sizes[c]) for (const [id, w] of m) m.set(id, w / sizes[c]); else next[c] = centres[c]; });
-      centres = next;
-      if (!changed && iter > 0) break;
+      return { assign, K: centres.length };
     }
-    titles.forEach((t, i) => { clusters[t] = assign[i]; });
-    clusterLabels = centres.map(c => [...c].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([id]) => terms[id]).join(" · ") || "misc");
+
+    // average silhouette over a sample: how well each article fits its own group (-1 to 1)
+    function silhouette(assign, K) {
+      const step = Math.max(1, Math.floor(n / 150));
+      let total = 0, count = 0;
+      for (let p = 0; p < n; p += step) {
+        const sum = new Float64Array(K), cnt = new Int32Array(K);
+        for (let q = 0; q < n; q++) if (q !== p) { sum[assign[q]] += 1 - dotP(pts[p], pts[q]); cnt[assign[q]]++; }
+        const c = assign[p];
+        count++;
+        if (cnt[c] === 0) continue;
+        const a = sum[c] / cnt[c];
+        let b = Infinity;
+        for (let k = 0; k < K; k++) if (k !== c && cnt[k]) b = Math.min(b, sum[k] / cnt[k]);
+        if (b !== Infinity) total += (b - a) / Math.max(a, b, 1e-9);
+      }
+      return count ? total / count : -1;
+    }
+
+    const Kmax = Math.min(12, Math.max(3, Math.floor(n / 5)));
+    let best = null;
+    for (let K = 3; K <= Kmax; K++) {
+      const r = kmeans(K);
+      const score = silhouette(r.assign, r.K);
+      if (!best || score > best.score) best = { ...r, score };
+    }
+
+    // label each group with the one word most specific to it (frequent here, rare elsewhere)
+    const K = best.K;
+    const inGroup = Array.from({ length: K }, () => new Map());
+    const groupTotal = new Float64Array(K);
+    tfs.forEach((counts, i) => {
+      const c = best.assign[i];
+      for (const [id, cnt] of counts) { inGroup[c].set(id, (inGroup[c].get(id) || 0) + cnt); groupTotal[c] += cnt; }
+    });
+    const groupsWith = new Map();
+    for (const m of inGroup) for (const id of m.keys()) groupsWith.set(id, (groupsWith.get(id) || 0) + 1);
+    const used = new Set();
+    clusterLabels = inGroup.map((m, c) => {
+      const scored = [...m].map(([id, cnt]) => [id, (cnt / groupTotal[c]) * Math.log(1 + K / groupsWith.get(id))])
+        .sort((x, y) => y[1] - x[1]);
+      const words = [];
+      for (const [id] of scored) {
+        if (words.length === 1) break;
+        if (!used.has(shown[id])) { words.push(shown[id]); used.add(shown[id]); }
+      }
+      return words.join(" · ") || "misc";
+    });
+    titles.forEach((t, i) => { clusters[t] = best.assign[i]; });
   }
   return { sims, springs, neighbours, clusters, clusterLabels };
 }

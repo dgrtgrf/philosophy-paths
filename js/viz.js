@@ -2,7 +2,8 @@
 /* global d3 */
 
 const TARGET = "Philosophy";
-const TOPIC_COLOURS = ["#4c78a8", "#54a24b", "#b279a2", "#d4a72c", "#72b7b2", "#9d755d", "#6b6ecf", "#e17c9a"];
+const TOPIC_COLOURS = ["#4c78a8", "#54a24b", "#b279a2", "#d4a72c", "#72b7b2", "#9d755d", "#6b6ecf", "#e17c9a",
+  "#17becf", "#bcbd22", "#8c564b", "#7f7f7f"];
 const RING = 72;
 
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -112,7 +113,7 @@ export function initViz() {
     .force("neighbours", neighbourForce)
     .alphaDecay(0.012);
   sim.on("tick", () => {
-    if (mix < 0.05) clampToRings();
+    if (mix < 0.5) clampToRings();
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
@@ -393,7 +394,7 @@ function renderLegend() {
   if (topicsOn && labels.length) {
     const present = new Set(nodes.map(n => n.cluster));
     labels.forEach((lab, i) => {
-      if (present.has(i)) html += `<div>${sw(`<circle cx="6" cy="6" r="4.5" fill="${TOPIC_COLOURS[i % 8]}"/>`)}${esc(lab)}</div>`;
+      if (present.has(i)) html += `<div>${sw(`<circle cx="6" cy="6" r="4.5" fill="${TOPIC_COLOURS[i % TOPIC_COLOURS.length]}"/>`)}${esc(lab)}</div>`;
     });
   } else {
     html += `<div>${sw('<circle cx="6" cy="6" r="4" fill="var(--ink)"/>')}Gets there</div>`;
@@ -407,7 +408,7 @@ function renderLegend() {
 }
 
 function paintTopics() {
-  const col = d => TOPIC_COLOURS[(d.cluster >= 0 ? d.cluster : 0) % 8];
+  const col = d => TOPIC_COLOURS[(d.cluster >= 0 ? d.cluster : 0) % TOPIC_COLOURS.length];
   nodeSel
     .style("fill", d => !topicsOn || d.cluster < 0 || d.status !== "reaches" ? null : col(d))
     .style("stroke", d => topicsOn && d.status === "stranded" && d.cluster >= 0 ? col(d) : null);
@@ -568,10 +569,10 @@ function clampToRings() {
     if (d.fx != null || d.x == null) continue;
     const r = Math.hypot(d.x, d.y);
     if (d.depth == null) {
-      const lo = R * 1.04, hi = R * 1.2;
+      // never inside the dashed ring; no outer limit, so they can sit as far past it as they need
+      const lo = R * 1.04;
       if (r < 1e-3) { const a = hash01(d.title) * 2 * Math.PI; d.x = Math.cos(a) * lo; d.y = Math.sin(a) * lo; continue; }
-      const t = Math.min(hi, Math.max(lo, r));
-      if (t !== r) { const sc = t / r; d.x *= sc; d.y *= sc; }
+      if (r < lo) { const sc = lo / r; d.x *= sc; d.y *= sc; }
     } else if (r > R) { const sc = R / r; d.x *= sc; d.y *= sc; }
   }
 }
