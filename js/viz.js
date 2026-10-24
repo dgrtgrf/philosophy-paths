@@ -554,7 +554,9 @@ function neighbourForce(alpha) {
       sx += s * o.x; sy += s * o.y; sw += s;
     }
     if (sw <= 0) continue;
-    d.vx += (sx / sw - d.x) * w; d.vy += (sy / sw - d.y) * w;
+    // a pull only as strong as the matches behind it: weak matches barely move anything
+    const pull = w * Math.min(1, sw / 0.8);
+    d.vx += (sx / sw - d.x) * pull; d.vy += (sy / sw - d.y) * pull;
   }
 }
 

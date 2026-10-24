@@ -99,6 +99,8 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
   const tooCommon = Math.max(40, n * 0.05);   // very common words say little about relatedness
   const springs = [], seen = new Set();
   const neighbours = {};   // title → [[other title, similarity], …], wider than the springs
+  // Weak matches are noise: with meaning vectors, unrelated text still scores about 0.1
+  const floor = vectors ? 0.2 : 0.05, springMin = vectors ? 0.2 : 0.08;
   const acc = new Float64Array(n), touched = new Int32Array(n);
   for (let i = 0; i < n; i++) {
     let best = [];
@@ -130,10 +132,10 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
         else if (s > best[KN - 1][1]) { best[KN - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
       }
     }
-    neighbours[titles[i]] = best.filter(([, s]) => s >= 0.05).map(([j, s]) => [titles[j], +s.toFixed(4)]);
+    neighbours[titles[i]] = best.filter(([, s]) => s >= floor).map(([j, s]) => [titles[j], +s.toFixed(4)]);
     for (const [j, s] of best.slice(0, 3)) {
       const key = i < j ? `${i},${j}` : `${j},${i}`;
-      if (s >= 0.08 && !seen.has(key) && !edgeKeys.has(key)) {
+      if (s >= springMin && !seen.has(key) && !edgeKeys.has(key)) {
         seen.add(key);
         springs.push({ source: titles[i], target: titles[j], sim: +s.toFixed(4) });
       }
