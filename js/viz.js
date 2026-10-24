@@ -87,7 +87,7 @@ let tickN = 0;
 
 // at Tree rings, only clicks decide position; at Relevance, only similarity does
 const radialStrength = () => 0.5 * (1 - mix);
-const relevanceWeight = () => 2 * mix;
+const relevanceWeight = () => 3 * mix;
 
 // ================================================================ public API
 export function initViz() {
@@ -104,10 +104,11 @@ export function initViz() {
 
   sim = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.title).distance(l => 24 + 70 * (1 - l.sim)).strength(0.9))
-    .force("relevance", d3.forceLink().id(d => d.title).distance(l => 18 + 130 * (1 - l.sim)))
+    .force("relevance", d3.forceLink().id(d => d.title).distance(l => 12 + 90 * (1 - l.sim)))
     .force("charge", d3.forceManyBody().strength(-70).distanceMax(500))
     .force("collide", d3.forceCollide(d => radius(d) + 1.5).iterations(2))
     .force("radial", d3.forceRadial(d => ringOf(d), 0, 0))
+    .force("topic", topicForce)
     .alphaDecay(0.012);
   sim.on("tick", () => {
     if (mix < 0.05) clampToRings();
@@ -184,6 +185,10 @@ export const isReplaying = () => replaying;
 
 // ================================================================ drawing
 function applyMix() {
+  // Philosophy is held at the centre at Tree rings; at Relevance it is placed by similarity like everything else
+  const root = nodes.find(d => d.status === "root");
+  if (root) { root.fx = mix < 0.5 ? 0 : null; root.fy = mix < 0.5 ? 0 : null; }
+  sim.force("link").strength(0.9 * (1 - mix));   // route links only matter at Tree rings; at Relevance, topic similarity alone decides
   sim.force("radial").strength(radialStrength());
   sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
   gRings.style("display", mix < 0.005 ? null : "none");  // rings only show at Tree rings
@@ -512,6 +517,23 @@ function drawRings() {
     g.select("text.top").attr("y", -d.r);
     g.select("text.bottom").attr("y", d.r);
   });
+}
+
+/** At Relevance only: pull every article towards the middle of its own topic, so topics bunch together. */
+function topicForce(alpha) {
+  const w = 0.3 * mix * alpha;
+  if (w <= 0) return;
+  const sums = new Map();
+  for (const d of nodes) {
+    if (d.cluster == null || d.cluster < 0 || d.x == null) continue;
+    const s = sums.get(d.cluster) || { x: 0, y: 0, n: 0 };
+    s.x += d.x; s.y += d.y; s.n++; sums.set(d.cluster, s);
+  }
+  for (const d of nodes) {
+    const s = sums.get(d.cluster);
+    if (!s || s.n < 2 || d.fx != null) continue;
+    d.vx += (s.x / s.n - d.x) * w; d.vy += (s.y / s.n - d.y) * w;
+  }
 }
 
 /** At Tree rings, articles that never arrive sit strictly outside the dashed "never arrives"
