@@ -135,7 +135,19 @@ export function initViz() {
   svg.node().addEventListener("pointerdown", stopAutoFit, true);
   svg.node().addEventListener("wheel", stopAutoFit, true);
   document.getElementById("search").addEventListener("focus", stopAutoFit);
-  svg.on("click", e => { if (e.target === svg.node() && pinned) unpin(); });
+  svg.on("click", e => {
+    if (e.target !== svg.node()) return;
+    if (pinned) unpin(); else { clearTrail(); clearHighlight(); }   // click empty map space to clear
+  });
+  svg.on("mouseleave", () => { clearTrail(); if (!pinned) clearHighlight(); });
+  // hover snaps to the nearest visible node within about 14 screen pixels, so small dots are easy to reach
+  svg.on("pointermove.snap", e => {
+    if (e.buttons) return;   // dragging or panning
+    const d = nearestNode(e);
+    if (d === hovered) { if (d) placeTip(e.clientX, e.clientY); return; }
+    if (d) { hovered = d; trailAdd(d); if (!pinned) paintTrail(); showTip(d); placeTip(e.clientX, e.clientY); }
+    else { hovered = null; tip.style.opacity = 0; }
+  });
 
   document.getElementById("mix").addEventListener("input", e => {
     mix = +e.target.value; applyMix(); sim.alpha(0.5).restart();
@@ -168,7 +180,7 @@ export function setData(slot, { routes, mode, analysis, subtitle }) {
     const s = slots.get(slot);
     clearTimeout(fitTimer); fitTimer = null;
     slotKey = slot; byTitle = s.byTitle; autoFitDone = s.autoFitDone;
-    pinned = null; hovered = null;
+    pinned = null; hovered = null; clearTrail();
     if (s.transform) svg.call(zoom.transform, s.transform);
     else svg.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
   }
@@ -282,9 +294,10 @@ function update(g, first) {
 
   document.getElementById("titles").innerHTML = nodes.map(n => `<option value="${esc(n.title)}">`).join("");
   if (pinned && !byTitle.has(pinned.title)) pinned = null;
-  if (pinned) highlight(pinned); else if (hovered) highlight(hovered);
+  if (pinned) highlight(pinned); else if (trail.nodes.size) paintTrail();
   renderSide();
   renderLegend();
+  applyHidden();
   scheduleFit(first);
 }
 
@@ -387,25 +400,47 @@ function wireSide(side) {
   const c = side.querySelector(".close"); if (c) c.onclick = unpin;
 }
 
+/** Legend entries can be switched off; hidden groups disappear from the map. */
+const hidden = new Set();
+const catOf = d => d.status === "stranded" ? "stranded" : (topicsOn && d.cluster >= 0 ? "topic:" + d.cluster : "reaches");
+const hiddenNode = d => d.status !== "root" && hidden.has(catOf(d));
+function applyHidden() {
+  nodeSel.style("display", d => hiddenNode(d) ? "none" : null);
+  labelSel.style("display", d => hiddenNode(d) ? "none" : null);
+  linkSel.style("display", l => {
+    const s = typeof l.source === "object" ? l.source : null, t = typeof l.target === "object" ? l.target : null;
+    const gone = (s && hiddenNode(s)) || (t && hiddenNode(t)) || (hidden.has("rescued") && l.rescued);
+    return gone ? "none" : null;
+  });
+}
+function toggleLegend(e) {
+  const el = e.target.closest("[data-k]");
+  if (!el) return;
+  const k = el.dataset.k;
+  hidden.has(k) ? hidden.delete(k) : hidden.add(k);
+  applyHidden();
+  renderLegend();
+}
+
 function renderLegend() {
   const sw = (inner, w = 12) => `<span class="sw"><svg width="${w}" height="12">${inner}</svg></span>`;
+  const item = (key, inner, text) => `<div data-k="${key}" class="${hidden.has(key) ? "off" : ""}">${inner}${text}</div>`;
   let html = `<div>${sw('<circle cx="6" cy="6" r="5" fill="var(--accent)"/>')}Philosophy</div>`;
   const labels = current.analysis.clusterLabels || [];
   if (topicsOn && labels.length) {
     const present = new Set(nodes.map(n => n.cluster));
     labels.forEach((lab, i) => {
-      if (present.has(i)) html += `<div>${sw(`<circle cx="6" cy="6" r="4.5" fill="${TOPIC_COLOURS[i % TOPIC_COLOURS.length]}"/>`)}${esc(lab)}</div>`;
+      if (present.has(i)) html += item("topic:" + i, sw(`<circle cx="6" cy="6" r="4.5" fill="${TOPIC_COLOURS[i % TOPIC_COLOURS.length]}"/>`), esc(lab));
     });
   } else {
-    html += `<div>${sw('<circle cx="6" cy="6" r="4" fill="var(--ink)"/>')}Gets there</div>`;
+    html += item("reaches", sw('<circle cx="6" cy="6" r="4" fill="var(--ink)"/>'), "Gets there");
   }
-  html += `<div>${sw('<circle cx="6" cy="6" r="4" fill="none" stroke="var(--stranded)" stroke-width="1.4"/>')}Never arrives</div>`;
+  html += item("stranded", sw('<circle cx="6" cy="6" r="4" fill="none" stroke="var(--stranded)" stroke-width="1.4"/>'), "Never arrives");
   const line = (stroke, dash = "") => sw(`<line x1="1" y1="6" x2="21" y2="6" stroke="${stroke}" stroke-width="3" stroke-linecap="round" ${dash}/>`, 22);
   html += `<div>${line("var(--ink)")}Thicker = more routes</div>`;
-  if (graph.links.some(l => l.rescued)) html += `<div>${line("var(--ink)", 'stroke-dasharray="4 4"')}Rescued by smart rules</div>`;
+  if (graph.links.some(l => l.rescued)) html += item("rescued", line("var(--ink)", 'stroke-dasharray="4 4"'), "Rescued by smart rules");
   html += `<div class="hint">Scroll to zoom · F to re-frame · Esc to unpin</div>`;
-  document.getElementById("legend").innerHTML = html;
-  document.getElementById("legendMobile").innerHTML = html;   // same key, shown inside the layout panel on phones
+  for (const id of ["legend", "legendMobile"]) { const el = document.getElementById(id); el.innerHTML = html; el.onclick = toggleLegend; }
 }
 
 function paintTopics() {
@@ -424,9 +459,9 @@ function bindNode(sel) {
       if (!e.active) sim.alphaTarget(0);
       if (d.status !== "root") { d.fx = null; d.fy = null; }
     }))
-    .on("mouseenter", (e, d) => { stopAutoFit(); hovered = d; if (!pinned) highlight(d); showTip(d); placeTip(e.clientX, e.clientY); })
+    .on("mouseenter", (e, d) => { stopAutoFit(); hovered = d; trailAdd(d); if (!pinned) paintTrail(); showTip(d); placeTip(e.clientX, e.clientY); })
     .on("mousemove", e => placeTip(e.clientX, e.clientY))
-    .on("mouseleave", () => { hovered = null; tip.style.opacity = 0; if (!pinned) clearHighlight(); })
+    .on("mouseleave", () => { hovered = null; tip.style.opacity = 0; })
     .on("click", (e, d) => { if (e.defaultPrevented) return; e.stopPropagation(); pin(d); })
     .on("dblclick", (e, d) => { e.stopPropagation(); window.open(wikiURL(d.title), "_blank"); });
 }
@@ -452,6 +487,31 @@ function highlight(d) {
   labelSel.classed("hl", n => onRoute.has(n.title));
   linkSel.classed("hl", l => hops.has(l.source.title + "\t" + l.target.title));
 }
+/** Hovered paths stay lit as the pointer moves, so sweeping across the map lights up many routes. */
+const trail = { nodes: new Set(), hops: new Set() };
+function trailAdd(d) {
+  const route = routeFrom(d);
+  for (const n of route) trail.nodes.add(n.title);
+  for (let i = 0; i < route.length - 1; i++) trail.hops.add(route[i].title + "\t" + route[i + 1].title);
+}
+function paintTrail() {
+  svg.classed("dim", true);
+  nodeSel.classed("hl", n => trail.nodes.has(n.title));
+  labelSel.classed("hl", n => trail.nodes.has(n.title));
+  linkSel.classed("hl", l => trail.hops.has(l.source.title + "\t" + l.target.title));
+}
+function nearestNode(e) {
+  const [x, y] = d3.pointer(e, world.node());
+  const k = d3.zoomTransform(svg.node()).k || 1;
+  let best = null, bestD = Infinity;
+  for (const d of nodes) {
+    if (d.x == null || hiddenNode(d)) continue;
+    const dist = Math.hypot(d.x - x, d.y - y);
+    if (dist < radius(d) + 14 / k && dist < bestD) { bestD = dist; best = d; }
+  }
+  return best;
+}
+function clearTrail() { trail.nodes.clear(); trail.hops.clear(); }
 function clearHighlight() {
   svg.classed("dim", false);
   nodeSel.classed("hl", false); labelSel.classed("hl", false); linkSel.classed("hl", false);
@@ -473,7 +533,7 @@ function placeTip(x, y) {
   tip.style.top = Math.min(y + 16, innerHeight - h - 12) + "px";
 }
 function pin(d) { pinned = d; highlight(d); renderSide(); }
-function unpin() { pinned = null; clearHighlight(); if (hovered) highlight(hovered); renderSide(); }
+function unpin() { pinned = null; clearHighlight(); if (trail.nodes.size) paintTrail(); renderSide(); }
 
 function focusOn(d) {
   if (!d) return;
