@@ -111,7 +111,6 @@ export function initViz() {
     .alphaDecay(0.012);
   sim.on("tick", () => {
     if (mix < 0.05) clampToRings();
-    if (++tickN % 3 === 0 || sim.alpha() < 0.02) drawRings();
     linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
     nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
@@ -187,7 +186,8 @@ export const isReplaying = () => replaying;
 function applyMix() {
   sim.force("radial").strength(radialStrength());
   sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
-  gRings.attr("opacity", Math.max(0, 1 - mix));          // rings fade out smoothly towards Relevance
+  gRings.style("display", mix < 0.005 ? null : "none");  // rings only show at Tree rings
+  drawRings();
 }
 
 function update(g, first) {
@@ -206,7 +206,10 @@ function update(g, first) {
   for (const d of [...nodes].reverse()) {
     if (!fresh.has(d)) continue;
     const anchor = d.next && byTitle.get(d.next);
-    if (d.depth != null && anchor && anchor.x != null && anchor !== d) {   // stranded articles start on the never-arrives ring
+    if (mix > 0.5) {   // towards Relevance, clicks mean nothing: start anywhere in a disc
+      const a = Math.random() * 2 * Math.PI, r = Math.sqrt(Math.random()) * (maxDepth + 2) * RING * 0.5;
+      d.x = Math.cos(a) * r; d.y = Math.sin(a) * r;
+    } else if (d.depth != null && anchor && anchor.x != null && anchor !== d) {
       d.x = anchor.x + (Math.random() - 0.5) * 30; d.y = anchor.y + (Math.random() - 0.5) * 30;
     } else {
       const a = Math.random() * 2 * Math.PI, r = ringOf(d) || 0.001;
@@ -498,81 +501,32 @@ function toggleReplay() {
 }
 
 // ================================================================ rings that bend, clamp
-const BINS = 72;
-const bin = a => Math.floor(((a + Math.PI) / (2 * Math.PI)) * BINS) % BINS;
 const circlePath = r => `M${-r},0a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0Z`;
 
-/** Fill directions with no articles from their neighbours, then smooth around the circle. */
-function fillAndSmooth(med, fallback, k) {
-  const out = med.map((v, i) => {
-    if (v != null) return v;
-    let l = null, r = null;
-    for (let o = 1; o < BINS && (l == null || r == null); o++) {
-      if (l == null) l = med[(i - o + BINS) % BINS];
-      if (r == null) r = med[(i + o) % BINS];
-    }
-    return l != null && r != null ? (l + r) / 2 : (l ?? r ?? fallback);
-  });
-  let arr = out;
-  for (let pass = 0; pass < 2; pass++) {       // two box blurs: a smooth, fluid outline
-    arr = arr.map((_, i) => {
-      let sum = 0;
-      for (let o = -k; o <= k; o++) sum += arr[(i + o + BINS * 4) % BINS];
-      return sum / (2 * k + 1);
-    });
-  }
-  return arr;
-}
-
-/** The outline of every ring, as a radius in each direction. Rings never cross: each
- *  ring sits outside the one before it. */
-function ringShapes(depths) {
-  const ds = depths.slice().sort((a, b) => a - b);
-  const buckets = new Map(ds.map(d => [d, Array.from({ length: BINS }, () => [])]));
-  for (const d of nodes) {
-    if (d.depth == null || d.x == null || !buckets.has(d.depth)) continue;
-    buckets.get(d.depth)[bin(Math.atan2(d.y, d.x))].push(Math.hypot(d.x, d.y));
-  }
-  const shapes = new Map();
-  let prev = null;
-  for (const d of ds) {
-    let med = buckets.get(d).map(b => b.length ? d3.median(b) : null);
-    let shape = fillAndSmooth(med, d * RING, 4);
-    if (prev) shape = shape.map((v, i) => Math.max(v, prev[i] + RING * 0.3));
-    shapes.set(d, shape);
-    prev = shape;
-  }
-  return shapes;
-}
-
-/** Blend between perfect circles (Tree rings) and the real outline (towards Relevance). */
-const ease = t => t * t * (3 - 2 * t);
+/** Contour rings are perfect circles, and are only shown at Tree rings. */
 function drawRings() {
   if (!ringSel || ringSel.empty()) return;
-  const t = ease(mix);
-  const shapes = ringShapes(ringSel.data().filter(d => !d.stranded).map(d => d.d));
   ringSel.each(function (d) {
     const g = d3.select(this);
-    if (d.stranded) { g.select("path").attr("d", circlePath(d.r)); return; }
-    const shape = shapes.get(d.d);
-    const radii = shape.map(v => (1 - t) * d.r + t * v);
-    g.select("path").attr("d", radii.map((r, i) => {
-      const a = (i + 0.5) * 2 * Math.PI / BINS - Math.PI;
-      return (i ? "L" : "M") + (Math.cos(a) * r).toFixed(1) + "," + (Math.sin(a) * r).toFixed(1);
-    }).join("") + "Z");
-    g.select("text.top").attr("y", -radii[Math.round(BINS / 4 - 0.5)]);
-    g.select("text.bottom").attr("y", radii[Math.round(3 * BINS / 4 - 0.5)]);
+    g.select("path").attr("d", circlePath(d.r));
+    g.select("text.top").attr("y", -d.r);
+    g.select("text.bottom").attr("y", d.r);
   });
 }
 
-/** Articles that never reach Philosophy stay inside the "never arrives" ring at Tree rings. */
+/** At Tree rings, articles that never arrive sit strictly outside the dashed "never arrives"
+ *  ring, and reached articles never cross it. */
 function clampToRings() {
   const R = (maxDepth + 2) * RING;
   for (const d of nodes) {
     if (d.fx != null || d.x == null) continue;
-    const lim = d.depth == null ? R * 1.2 : R;
     const r = Math.hypot(d.x, d.y);
-    if (r > lim && r > 0) { const s = lim / r; d.x *= s; d.y *= s; }
+    if (d.depth == null) {
+      const lo = R * 1.04, hi = R * 1.2;
+      if (r < 1e-3) { const a = hash01(d.title) * 2 * Math.PI; d.x = Math.cos(a) * lo; d.y = Math.sin(a) * lo; continue; }
+      const t = Math.min(hi, Math.max(lo, r));
+      if (t !== r) { const sc = t / r; d.x *= sc; d.y *= sc; }
+    } else if (r > R) { const sc = R / r; d.x *= sc; d.y *= sc; }
   }
 }
 
