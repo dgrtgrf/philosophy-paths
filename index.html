@@ -110,6 +110,7 @@
   input[type=search]:focus { border-color: var(--accent); }
 
   #legend { bottom: 18px; right: 18px; color: var(--muted); font-size: 12px; max-width: 270px; }
+  #legendMobile { display: none; }
   #legend div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
   .sw { width: 22px; flex: none; display: inline-flex; justify-content: center; }
   .hint { margin-top: 6px !important; }
@@ -217,6 +218,8 @@
     #controls.open #extras { display: block; margin-top: 10px; }
     #controls.open #extras input[type=search] { margin-top: 10px; }
     #side, #legend { display: none; }
+    #legendMobile { display: block; color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+    #legendMobile div { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
     body.has-pin #controls { z-index: 6; }   /* stays reachable while a node is pinned */
     body.has-pin #side { display: block; top: auto; right: 10px; left: 10px; bottom: 10px; width: auto;
       max-height: 52vh; }
@@ -262,6 +265,7 @@
   </div>
   <button id="more" type="button">Layout, topics &amp; search ▾</button>
   <div id="extras">
+  <div id="legendMobile"></div>
   <label class="cap" for="mix">Layout</label>
   <input id="mix" type="range" min="0" max="1" step="0.01" value="0.3">
   <div class="ends"><span>Tree rings</span><span>Relevance</span></div>

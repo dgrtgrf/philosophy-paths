@@ -405,6 +405,7 @@ function renderLegend() {
   if (graph.links.some(l => l.rescued)) html += `<div>${line("var(--ink)", 'stroke-dasharray="4 4"')}Rescued by smart rules</div>`;
   html += `<div class="hint">Scroll to zoom · F to re-frame · Esc to unpin</div>`;
   document.getElementById("legend").innerHTML = html;
+  document.getElementById("legendMobile").innerHTML = html;   // same key, shown inside the layout panel on phones
 }
 
 function paintTopics() {
