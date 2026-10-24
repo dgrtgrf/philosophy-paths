@@ -109,6 +109,7 @@ export function initViz() {
     .force("collide", d3.forceCollide(d => radius(d) + 1.5).iterations(2))
     .force("radial", d3.forceRadial(d => ringOf(d), 0, 0))
     .force("topic", topicForce)
+    .force("neighbours", neighbourForce)
     .alphaDecay(0.012);
   sim.on("tick", () => {
     if (mix < 0.05) clampToRings();
@@ -533,6 +534,27 @@ function topicForce(alpha) {
     const s = sums.get(d.cluster);
     if (!s || s.n < 2 || d.fx != null) continue;
     d.vx += (s.x / s.n - d.x) * w; d.vy += (s.y / s.n - d.y) * w;
+  }
+}
+
+/** At Relevance only: pull every article towards the similarity-weighted middle of its nearest
+ *  neighbours, so close relatives sit together even when they are not direct springs. */
+function neighbourForce(alpha) {
+  const w = 0.4 * mix * alpha;
+  const nb = current.analysis?.neighbours;
+  if (w <= 0 || !nb) return;
+  for (const d of nodes) {
+    if (d.fx != null || d.x == null) continue;
+    const list = nb[d.title];
+    if (!list) continue;
+    let sx = 0, sy = 0, sw = 0;
+    for (const [t, s] of list) {
+      const o = byTitle.get(t);
+      if (!o || o === d || o.x == null) continue;
+      sx += s * o.x; sy += s * o.y; sw += s;
+    }
+    if (sw <= 0) continue;
+    d.vx += (sx / sw - d.x) * w; d.vy += (sy / sw - d.y) * w;
   }
 }
 

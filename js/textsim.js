@@ -43,7 +43,8 @@ function tokens(text) {
  */
 export function analyse(titles, textOf, edges, k = 3, vectors = null) {
   const n = titles.length;
-  const empty = { sims: {}, springs: [], clusters: {}, clusterLabels: [] };
+  const empty = { sims: {}, springs: [], neighbours: {}, clusters: {}, clusterLabels: [] };
+  const KN = 10;   // how many nearest neighbours each article keeps for layout
   if (!n) return empty;
   const index = new Map(titles.map((t, i) => [t, i]));
 
@@ -97,6 +98,7 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
   docs.forEach((v, i) => { for (const [id, w] of v) postings[id].push(i, w); });
   const tooCommon = Math.max(40, n * 0.05);   // very common words say little about relatedness
   const springs = [], seen = new Set();
+  const neighbours = {};   // title → [[other title, similarity], …], wider than the springs
   const acc = new Float64Array(n), touched = new Int32Array(n);
   for (let i = 0; i < n; i++) {
     let best = [];
@@ -105,8 +107,8 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
       for (let j = 0; j < n; j++) {
         if (j === i) continue;
         const s = similar(i, j);
-        if (best.length < k) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
-        else if (s > best[k - 1][1]) { best[k - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
+        if (best.length < KN) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
+        else if (s > best[KN - 1][1]) { best[KN - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
       }
     } else {
       let nt = 0;
@@ -124,11 +126,12 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
       for (let x = 0; x < nt; x++) {
         const j = touched[x], s = acc[j];
         acc[j] = 0;
-        if (best.length < k) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
-        else if (s > best[k - 1][1]) { best[k - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
+        if (best.length < KN) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
+        else if (s > best[KN - 1][1]) { best[KN - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
       }
     }
-    for (const [j, s] of best) {
+    neighbours[titles[i]] = best.filter(([, s]) => s >= 0.05).map(([j, s]) => [titles[j], +s.toFixed(4)]);
+    for (const [j, s] of best.slice(0, 3)) {
       const key = i < j ? `${i},${j}` : `${j},${i}`;
       if (s >= 0.08 && !seen.has(key) && !edgeKeys.has(key)) {
         seen.add(key);
@@ -176,5 +179,5 @@ export function analyse(titles, textOf, edges, k = 3, vectors = null) {
     titles.forEach((t, i) => { clusters[t] = assign[i]; });
     clusterLabels = centres.map(c => [...c].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([id]) => terms[id]).join(" · ") || "misc");
   }
-  return { sims, springs, clusters, clusterLabels };
+  return { sims, springs, neighbours, clusters, clusterLabels };
 }
