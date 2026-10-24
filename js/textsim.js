@@ -17,17 +17,31 @@ toward towards two under until up upon us very via was we well were what whateve
 whereby wherein whereupon wherever whether which while whither who whoever whole whom whose why will with within without would yet
 you your yours yourself yourselves used known including also called`.split(/\s+/));
 
+// Light suffix stripping, so "belief"/"beliefs" and "believe"/"believed" count as one word.
+function stem(w) {
+  if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
+  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
+  if (w.length > 4 && w.endsWith("ed")) return w.slice(0, -2);
+  if (w.length > 4 && /(s|x|z|ch|sh)es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  if (w.length > 4 && w.endsWith("e")) return w.slice(0, -1);
+  return w;
+}
+
 function tokens(text) {
-  return (text.toLowerCase().match(/[a-z][a-z0-9]+/g) || []).filter(w => !STOP.has(w) && !/^\d+$/.test(w));
+  return (text.toLowerCase().match(/[a-z][a-z0-9]+/g) || [])
+    .filter(w => !STOP.has(w) && !/^\d+$/.test(w)).map(stem);
 }
 
 /**
  * titles: string[] (busiest first is best — it makes topic colours steadier)
  * textOf: title → intro text
  * edges:  [[a, b], …] route links (get a similarity each, and are skipped as springs)
+ * vectors: optional, title index → unit-length meaning vector (Float32Array). When given,
+ *          similarity is a 50/50 blend of word overlap and meaning. Null = word overlap only.
  * → { sims: {"a\tb": s}, springs: [{source, target, sim}], clusters: {title: id}, clusterLabels: [] }
  */
-export function analyse(titles, textOf, edges, k = 3) {
+export function analyse(titles, textOf, edges, k = 3, vectors = null) {
   const n = titles.length;
   const empty = { sims: {}, springs: [], clusters: {}, clusterLabels: [] };
   if (!n) return empty;
@@ -64,13 +78,17 @@ export function analyse(titles, textOf, edges, k = 3) {
     return s;
   };
 
+  // how alike two articles are: words only, or words blended with meaning
+  const cos = (i, j) => { const a = vectors[i], b = vectors[j]; let s = 0; for (let x = 0; x < a.length; x++) s += a[x] * b[x]; return s; };
+  const similar = (i, j) => vectors ? 0.5 * dot(docs[i], docs[j]) + 0.5 * cos(i, j) : dot(docs[i], docs[j]);
+
   // similarity of every route link
   const sims = {};
   const edgeKeys = new Set();
   for (const [a, b] of edges) {
     const i = index.get(a), j = index.get(b);
     if (i === undefined || j === undefined) continue;
-    sims[`${a}\t${b}`] = +dot(docs[i], docs[j]).toFixed(4);
+    sims[`${a}\t${b}`] = +similar(i, j).toFixed(4);
     edgeKeys.add(i < j ? `${i},${j}` : `${j},${i}`);
   }
 
@@ -81,24 +99,34 @@ export function analyse(titles, textOf, edges, k = 3) {
   const springs = [], seen = new Set();
   const acc = new Float64Array(n), touched = new Int32Array(n);
   for (let i = 0; i < n; i++) {
-    let nt = 0;
-    for (const [id, w] of docs[i]) {
-      const p = postings[id];
-      if (p.length / 2 > tooCommon) continue;
-      for (let x = 0; x < p.length; x += 2) {
-        const j = p[x];
+    let best = [];
+    if (vectors) {
+      // meaning matters too, so compare with every other article (fine up to a few thousand)
+      for (let j = 0; j < n; j++) {
         if (j === i) continue;
-        if (acc[j] === 0) touched[nt++] = j;
-        acc[j] += w * p[x + 1];
+        const s = similar(i, j);
+        if (best.length < k) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
+        else if (s > best[k - 1][1]) { best[k - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
       }
-    }
-    // top k without sorting everything
-    const best = [];
-    for (let x = 0; x < nt; x++) {
-      const j = touched[x], s = acc[j];
-      acc[j] = 0;
-      if (best.length < k) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
-      else if (s > best[k - 1][1]) { best[k - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
+    } else {
+      let nt = 0;
+      for (const [id, w] of docs[i]) {
+        const p = postings[id];
+        if (p.length / 2 > tooCommon) continue;
+        for (let x = 0; x < p.length; x += 2) {
+          const j = p[x];
+          if (j === i) continue;
+          if (acc[j] === 0) touched[nt++] = j;
+          acc[j] += w * p[x + 1];
+        }
+      }
+      // top k without sorting everything
+      for (let x = 0; x < nt; x++) {
+        const j = touched[x], s = acc[j];
+        acc[j] = 0;
+        if (best.length < k) { best.push([j, s]); best.sort((a, b) => b[1] - a[1]); }
+        else if (s > best[k - 1][1]) { best[k - 1] = [j, s]; best.sort((a, b) => b[1] - a[1]); }
+      }
     }
     for (const [j, s] of best) {
       const key = i < j ? `${i},${j}` : `${j},${i}`;
