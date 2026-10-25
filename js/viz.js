@@ -65,14 +65,17 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
 }
 
 // ================================================================ state
-let svg, world, gRings, gLinks, gNodes, gLabels, tip, sim, zoom;
+let cv = null, ctx2 = null, tip, sim, zoom;
+let transform = d3.zoomIdentity, dpr = 1, rings = [];   // rings: contour rings, drawn on the canvas
+let qt = null, qtDirty = true, maxHitR = 0;             // quadtree over visible nodes, for pointer lookups
+let drawQueued = false, drag = null, suppressClick = false;
+const hl = { on: false, nodes: new Set(), hops: new Set() };   // the route lit by a click
 let nodes = [], links = [], springs = [];
 let byTitle = new Map();
 const slots = new Map();      // "mine" / "everyone" → { byTitle, autoFitDone, transform }
 let slotKey = null;
 let current = { routes: [], mode: "classic", analysis: {}, subtitle: "" };
 let graph = null;
-let linkSel, nodeSel, labelSel, ringSel;
 let maxDepth = 1, rScale = d3.scaleSqrt(), strokeW = d3.scaleSqrt(), strokeO = d3.scaleSqrt();
 const radius = d => d.status === "root" ? Math.max(9, rScale(d.visits)) : rScale(d.visits);
 // a stable 0..1 number for a title, so the same article always lands in the same place
@@ -92,16 +95,12 @@ const relevanceWeight = () => 3 * mix;
 
 // ================================================================ public API
 export function initViz() {
-  svg = d3.select("#viz");
-  world = svg.append("g");
-  gRings = world.append("g");
-  gLinks = world.append("g");
-  gNodes = world.append("g");
-  gLabels = world.append("g");
+  cv = d3.select("#viz");
+  ctx2 = cv.node().getContext("2d");
   tip = document.getElementById("tip");
-  linkSel = gLinks.selectAll("line"); nodeSel = gNodes.selectAll("circle");
-  labelSel = gLabels.selectAll("text"); ringSel = gRings.selectAll("g");
   mix = +document.getElementById("mix").value;
+  sizeCanvas();
+  window.addEventListener("resize", sizeCanvas);
 
   sim = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.title).distance(l => 24 + 70 * (1 - l.sim)).strength(0.9))
@@ -114,41 +113,25 @@ export function initViz() {
     .alphaDecay(0.012);
   sim.on("tick", () => {
     if (mix < 0.5) clampToRings();
-    linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-           .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-    nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
-    labelSel.attr("x", d => d.x + radius(d) + 4 / k).attr("y", d => d.y);
+    qtDirty = true;      // positions moved, so the pointer lookup tree is stale
+    requestDraw();
   });
   sim.on("end.fit", () => { if (!autoFitDone) fitView(600); });
   window.addEventListener("resize", () => { if (!autoFitDone) fitView(300); });
 
-  zoom = d3.zoom().scaleExtent([0.05, 12]).on("zoom", e => {
-    world.attr("transform", e.transform);
-    k = e.transform.k; updateLabels();
-    if (slotKey) slots.get(slotKey).transform = e.transform;
+  zoom = d3.zoom().scaleExtent([0.05, 12]).filter(zoomFilter).on("zoom", e => {
+    transform = e.transform;
+    requestDraw();
+    if (slotKey) slots.get(slotKey).transform = transform;
   });
-  svg.call(zoom).on("dblclick.zoom", null);
-  svg.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
+  cv.call(zoom).on("dblclick.zoom", null);
+  cv.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
   // While you're just watching, the view keeps the whole tree in frame as it grows.
   // The moment you start browsing (hover a dot, click, scroll, drag, search), it stops
   // moving on its own. F re-frames once.
-  svg.node().addEventListener("pointerdown", stopAutoFit, true);
-  svg.node().addEventListener("wheel", stopAutoFit, true);
+  cv.node().addEventListener("wheel", stopAutoFit, true);
   document.getElementById("search").addEventListener("focus", stopAutoFit);
-  // a click on empty map picks the nearest node (small dots are hard to hit when zoomed out); otherwise it clears the pin
-  svg.on("click", e => {
-    if (e.defaultPrevented) return;
-    const d = nearestNode(e);
-    if (d) pin(d); else if (pinned) unpin();
-  });
-  // hover snaps to the nearest visible node within about 14 screen pixels, so small dots are easy to reach
-  svg.on("pointermove.snap", e => {
-    if (e.buttons) return;   // dragging or panning
-    const d = nearestNode(e);
-    if (d === hovered) { if (d) placeTip(e.clientX, e.clientY); return; }
-    if (d) { showHover(d); placeTip(e.clientX, e.clientY); }
-    else hideHover();
-  });
+  wirePointer();
 
   document.getElementById("mix").addEventListener("input", e => {
     mix = +e.target.value; applyMix(); sim.alpha(0.5).restart();
@@ -168,6 +151,8 @@ export function initViz() {
     if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
     if (e.key === "f" || e.key === "F") fitView();
   });
+  // read-only hooks for the browser tests
+  window.__viz = { nodes: () => nodes, transform: () => transform, lit: () => hl.nodes.size };
   applyMix();
 }
 
@@ -181,9 +166,9 @@ export function setData(slot, { routes, mode, analysis, subtitle }) {
     const s = slots.get(slot);
     clearTimeout(fitTimer); fitTimer = null;
     slotKey = slot; byTitle = s.byTitle; autoFitDone = s.autoFitDone;
-    pinned = null; hovered = null;
-    if (s.transform) svg.call(zoom.transform, s.transform);
-    else svg.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
+    pinned = null; hovered = null; clearHighlight();
+    if (s.transform) cv.call(zoom.transform, s.transform);
+    else cv.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
   }
   current = { routes, mode, analysis: analysis || {}, subtitle };
   if (replaying) return;               // replay keeps going; it picks up the new data when done
@@ -206,8 +191,7 @@ function applyMix() {
   sim.force("link").strength(0.9 * (1 - mix));   // route links only matter at Tree rings; at Relevance, topic similarity alone decides
   sim.force("radial").strength(radialStrength());
   sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
-  gRings.style("display", mix < 0.005 ? null : "none");  // rings only show at Tree rings
-  drawRings();
+  requestDraw();   // contour rings are only drawn at Tree rings
 }
 
 function update(g, first) {
@@ -247,43 +231,18 @@ function update(g, first) {
   rScale = d3.scaleSqrt().domain([1, Math.max(2, maxVisits)]).range([2.2, 16]);
 
   // faint contour rings every 5 clicks from Philosophy
-  const ringData = !nodes.length ? [] : d3.range(5, Math.ceil(maxDepth / 5) * 5 + 1, 5)
+  rings = !nodes.length ? [] : d3.range(5, Math.ceil(maxDepth / 5) * 5 + 1, 5)
     .map(d => ({ d, r: d * RING, label: plural(d, "click") }));
   if (nodes.some(n => n.status === "stranded"))
-    ringData.push({ d: "x", r: (maxDepth + 2) * RING, label: "never arrives", stranded: true });
-  ringSel = gRings.selectAll("g").data(ringData, d => d.d).join(enter => {
-    const gg = enter.append("g");
-    gg.append("path");
-    gg.append("text").attr("class", "ring-label top").attr("dy", "-0.4em");
-    gg.append("text").attr("class", "ring-label bottom").attr("dy", "1.1em");
-    return gg;
-  });
-  ringSel.select("path").attr("class", d => "ring" + (d.stranded ? " stranded" : ""));
-  ringSel.select("text.top").attr("x", 0).attr("y", d => -d.r).text(d => d.label);
-  ringSel.select("text.bottom").attr("x", 0).attr("y", d => d.r).text(d => d.label);
+    rings.push({ d: "x", r: (maxDepth + 2) * RING, label: "never arrives", stranded: true });
 
-  linkSel = gLinks.selectAll("line")
-    .data(links, d => (d.source.title ?? d.source) + "\t" + (d.target.title ?? d.target))
-    .join("line").attr("class", "link")
-    .attr("stroke-width", d => strokeW(d.count))
-    .attr("stroke-opacity", d => strokeO(d.count))
-    .attr("stroke-dasharray", d => d.rescued ? `${strokeW(d.count) + 2} ${strokeW(d.count) + 3}` : null);
-  linkSel.order();
-
-  nodeSel = gNodes.selectAll("circle").data(nodes, d => d.title)
-    .join(enter => enter.append("circle").call(bindNode))
-    .attr("class", d => `node ${d.status}${d.leaf && d.status === "reaches" ? " leaf" : ""}${fresh.has(d) && !first ? " fresh" : ""}`)
-    .attr("r", radius);
-  if (!first && fresh.size) setTimeout(() => nodeSel.classed("fresh", false), 2500);
-  paintTopics();
-
-  const labelled = nodes.slice(0, 400);
-  labelled.forEach((d, i) => d.rank = i);
-  labelSel = gLabels.selectAll("text").data(labelled, d => d.title)
-    .join("text")
-    .attr("class", d => "label" + (d.status === "root" ? " root" : ""))
-    .attr("dy", "0.35em").text(d => d.title);
-  updateLabels();
+  // labels: the first 400 articles, and more as you zoom in (see drawScene)
+  nodes.forEach((d, i) => { d.rank = i; });
+  // new arrivals glow for 2.5 seconds
+  for (const d of fresh) d.freshUntil = first ? 0 : performance.now() + 2500;
+  if (!first && fresh.size) setTimeout(requestDraw, 2600);
+  qtDirty = true;
+  requestDraw();
 
   sim.nodes(nodes);
   sim.force("link").links(links);
@@ -302,11 +261,7 @@ function update(g, first) {
   scheduleFit(first);
 }
 
-function updateLabels() {
-  labelSel.attr("font-size", 11.5 / k).attr("stroke-width", 3 / k)
-    .style("display", d => !hiddenNode(d) && (d.status === "root" || d.rank < 14 * k * k) ? null : "none");
-  ringSel.selectAll("text").attr("font-size", 10 / k).attr("stroke-width", 3 / k);
-}
+function updateLabels() { requestDraw(); }
 
 /** Frame the whole tree inside the space the panels leave free. */
 function fitView(duration = 900) {
@@ -326,7 +281,7 @@ function fitView(duration = 900) {
   const w = Math.max(x1 - x0, 1), h = Math.max(y1 - y0, 1);
   const s = Math.max(0.05, Math.min(2.5, Math.min((right - left) / w, (bottom - top) / h)));
   const cx = (left + right) / 2, cy = (top + bottom) / 2;
-  svg.transition().duration(duration).call(zoom.transform,
+  cv.transition().duration(duration).call(zoom.transform,
     d3.zoomIdentity.translate(cx, cy).scale(s).translate(-(x0 + x1) / 2, -(y0 + y1) / 2));
 }
 function scheduleFit(first) {
@@ -407,13 +362,8 @@ const isHidden = key => picked.size > 0 && !picked.has(key);
 const catOf = d => d.status === "stranded" ? "stranded" : (topicsOn && d.cluster >= 0 ? "topic:" + d.cluster : "reaches");
 const hiddenNode = d => d.status !== "root" && isHidden(catOf(d));
 function applyHidden() {
-  nodeSel.style("display", d => hiddenNode(d) ? "none" : null);
-  updateLabels();
-  linkSel.style("display", l => {
-    const s = typeof l.source === "object" ? l.source : null, t = typeof l.target === "object" ? l.target : null;
-    const gone = (s && hiddenNode(s)) || (t && hiddenNode(t)) || (isHidden("rescued") && l.rescued);
-    return gone ? "none" : null;
-  });
+  qtDirty = true;
+  requestDraw();
 }
 function toggleLegend(e) {
   const el = e.target.closest("[data-k]");
@@ -448,29 +398,9 @@ function renderLegend() {
   for (const id of ["legend", "legendMobile"]) { const el = document.getElementById(id); el.innerHTML = html; el.onclick = toggleLegend; }
 }
 
-function paintTopics() {
-  const col = d => TOPIC_COLOURS[(d.cluster >= 0 ? d.cluster : 0) % TOPIC_COLOURS.length];
-  nodeSel
-    .style("fill", d => !topicsOn || d.cluster < 0 || d.status !== "reaches" ? null : col(d))
-    .style("stroke", d => topicsOn && d.status === "stranded" && d.cluster >= 0 ? col(d) : null);
-}
+function paintTopics() { requestDraw(); }
 
 // ================================================================ hover, pin, drag
-function bindNode(sel) {
-  sel.call(d3.drag()
-    .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.2).restart(); d.fx = d.x; d.fy = d.y; })
-    .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-    .on("end", (e, d) => {
-      if (!e.active) sim.alphaTarget(0);
-      if (d.status !== "root") { d.fx = null; d.fy = null; }
-    }))
-    .on("mouseenter", (e, d) => { stopAutoFit(); showHover(d); placeTip(e.clientX, e.clientY); })
-    .on("mousemove", e => placeTip(e.clientX, e.clientY))
-    .on("mouseleave", () => hideHover())
-    .on("click", (e, d) => { if (e.defaultPrevented) return; e.stopPropagation(); pin(d); })
-    .on("dblclick", (e, d) => { e.stopPropagation(); window.open(wikiURL(d.title), "_blank"); });
-}
-
 function routeFrom(d) {
   const route = [d], seen = new Set([d.title]);
   let cur = d;
@@ -485,31 +415,38 @@ function routeFrom(d) {
 
 function highlight(d) {
   const route = routeFrom(d);
-  const onRoute = new Set(route.map(n => n.title)), hops = new Set();
-  for (let i = 0; i < route.length - 1; i++) hops.add(route[i].title + "\t" + route[i + 1].title);
-  svg.classed("dim", true);
-  nodeSel.classed("hl", n => onRoute.has(n.title));
-  labelSel.classed("hl", n => onRoute.has(n.title));
-  linkSel.classed("hl", l => hops.has(l.source.title + "\t" + l.target.title));
+  hl.nodes = new Set(route.map(n => n.title));
+  hl.hops = new Set();
+  for (let i = 0; i < route.length - 1; i++) hl.hops.add(route[i].title + "\t" + route[i + 1].title);
+  hl.on = true;
+  requestDraw();
 }
 /** Hovering only shows the name; a path is highlighted when a node is clicked. */
 function showHover(d) { hovered = d; showTip(d); }
 function hideHover() { hovered = null; tip.style.opacity = 0; }
-/** The nearest visible node to the pointer, within about 14 screen pixels. */
-function nearestNode(e) {
-  const [x, y] = d3.pointer(e, world.node());
-  const k = d3.zoomTransform(svg.node()).k || 1;
-  let best = null, bestD = Infinity;
-  for (const d of nodes) {
-    if (d.x == null || hiddenNode(d)) continue;
-    const dist = Math.hypot(d.x - x, d.y - y);
-    if (dist < radius(d) + 14 / k && dist < bestD) { bestD = dist; best = d; }
-  }
-  return best;
+/** The visible node under the pointer (within about 14 screen pixels), found with a quadtree. */
+function worldAt(clientX, clientY) {
+  const r = cv.node().getBoundingClientRect();
+  return transform.invert([clientX - r.left, clientY - r.top]);
+}
+function ensureTree() {
+  if (!qtDirty) return qt;
+  const visible = nodes.filter(d => d.x != null && !hiddenNode(d));
+  maxHitR = d3.max(visible, d => radius(d)) || 0;
+  qt = d3.quadtree().x(d => d.x).y(d => d.y).addAll(visible);
+  qtDirty = false;
+  return qt;
+}
+function nodeAt(clientX, clientY) {
+  const [x, y] = worldAt(clientX, clientY);
+  const slack = 14 / transform.k;
+  const hit = ensureTree().find(x, y, maxHitR + slack);
+  if (!hit) return null;
+  return Math.hypot(hit.x - x, hit.y - y) < radius(hit) + slack ? hit : null;
 }
 function clearHighlight() {
-  svg.classed("dim", false);
-  nodeSel.classed("hl", false); labelSel.classed("hl", false); linkSel.classed("hl", false);
+  hl.on = false; hl.nodes = new Set(); hl.hops = new Set();
+  requestDraw();
 }
 function showTip(d) {
   const where = d.status === "root" ? "The destination."
@@ -534,7 +471,7 @@ function focusOn(d) {
   if (!d) return;
   stopAutoFit();
   const s = Math.max(k, 1.4);
-  svg.transition().duration(700).call(zoom.transform,
+  cv.transition().duration(700).call(zoom.transform,
     d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(s).translate(-d.x, -d.y));
   pin(d);
 }
@@ -564,19 +501,6 @@ function toggleReplay() {
 }
 
 // ================================================================ rings that bend, clamp
-const circlePath = r => `M${-r},0a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0Z`;
-
-/** Contour rings are perfect circles, and are only shown at Tree rings. */
-function drawRings() {
-  if (!ringSel || ringSel.empty()) return;
-  ringSel.each(function (d) {
-    const g = d3.select(this);
-    g.select("path").attr("d", circlePath(d.r));
-    g.select("text.top").attr("y", -d.r);
-    g.select("text.bottom").attr("y", d.r);
-  });
-}
-
 /** At Relevance only: pull every article towards the middle of its own topic, so topics bunch together. */
 function topicForce(alpha) {
   const w = 0.3 * mix * alpha;
@@ -633,38 +557,188 @@ function clampToRings() {
   }
 }
 
+// ================================================================ canvas drawing
+const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif';
+function colours() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = n => cs.getPropertyValue(n).trim();
+  return { bg: v("--bg"), ink: v("--ink"), muted: v("--muted"), accent: v("--accent"), stranded: v("--stranded") };
+}
+const topicColour = d => TOPIC_COLOURS[(d.cluster >= 0 ? d.cluster : 0) % TOPIC_COLOURS.length];
+/** A link is drawn only when both ends are shown, and rescued links are shown only if their group is. */
+const linkHidden = l => {
+  if (typeof l.source !== "object" || typeof l.target !== "object") return true;
+  return hiddenNode(l.source) || hiddenNode(l.target) || (isHidden("rescued") && !!l.rescued);
+};
+
+/** Paint the whole tree into c. t is the view transform; s is device pixels per CSS pixel. */
+function drawScene(c, t, s) {
+  const css = colours(), k = t.k, now = performance.now(), dim = hl.on;
+  c.setTransform(s * k, 0, 0, s * k, s * t.x, s * t.y);
+  c.globalAlpha = 1;
+  c.lineJoin = "round";
+
+  // contour rings: circles, only at Tree rings
+  if (mix < 0.005) {
+    const fs = 10 / k;
+    c.font = `500 ${fs}px ${FONT}`; c.textAlign = "center"; c.textBaseline = "alphabetic";
+    for (const ring of rings) {
+      c.beginPath(); c.arc(0, 0, ring.r, 0, 2 * Math.PI);
+      c.globalAlpha = 0.1; c.strokeStyle = css.ink; c.lineWidth = 1 / k;
+      c.setLineDash(ring.stranded ? [3, 5] : []); c.stroke(); c.setLineDash([]);
+      c.globalAlpha = 0.55; c.lineWidth = 3 / k; c.strokeStyle = css.bg; c.fillStyle = css.muted;
+      c.strokeText(ring.label, 0, -ring.r - 0.4 * fs); c.fillText(ring.label, 0, -ring.r - 0.4 * fs);
+      c.strokeText(ring.label, 0, ring.r + 1.1 * fs); c.fillText(ring.label, 0, ring.r + 1.1 * fs);
+    }
+  }
+
+  // route links
+  c.lineCap = "round";
+  for (const l of links) {
+    if (linkHidden(l)) continue;
+    const hop = dim && hl.hops.has(l.source.title + "\t" + l.target.title);
+    const w = strokeW(l.count), a = strokeO(l.count);
+    c.globalAlpha = dim && !hop ? a * 0.05 : a;
+    c.strokeStyle = hop ? css.accent : css.ink;
+    c.lineWidth = w;
+    c.setLineDash(l.rescued ? [w + 2, w + 3] : []);
+    c.beginPath(); c.moveTo(l.source.x, l.source.y); c.lineTo(l.target.x, l.target.y); c.stroke();
+  }
+  c.setLineDash([]); c.lineCap = "butt";
+
+  // articles
+  for (const d of nodes) {
+    if (d.x == null || hiddenNode(d)) continue;
+    const onHl = hl.nodes.has(d.title);
+    let fill = d.status === "root" ? css.accent
+      : d.status === "stranded" ? css.bg
+      : (d.leaf && d.status === "reaches" ? css.muted : css.ink);
+    let stroke = d.status === "root" ? null : d.status === "stranded" ? css.stranded : css.bg;
+    let sw = d.status === "stranded" ? 1.2 : 1;
+    if (topicsOn && d.cluster >= 0) {
+      if (d.status === "reaches") fill = topicColour(d);
+      else if (d.status === "stranded") stroke = topicColour(d);
+    }
+    if (d.freshUntil > now) { stroke = css.accent; sw = 2; }
+    if (onHl) { stroke = css.accent; sw = 2; }
+    c.globalAlpha = dim && !onHl ? 0.15 : 1;
+    c.beginPath(); c.arc(d.x, d.y, radius(d), 0, 2 * Math.PI);
+    c.fillStyle = fill; c.fill();
+    if (stroke) { c.strokeStyle = stroke; c.lineWidth = sw; c.stroke(); }
+  }
+
+  // labels: the first 400 articles, plus more as you zoom in; the root always shows
+  c.textAlign = "left"; c.textBaseline = "alphabetic";
+  for (const d of nodes) {
+    if (d.x == null || hiddenNode(d) || d.rank >= 400) continue;
+    if (!(d.status === "root" || d.rank < 14 * k * k)) continue;
+    const fs = 11.5 / k, onHl = hl.nodes.has(d.title), root = d.status === "root";
+    const x = d.x + radius(d) + 4 / k, y = d.y + 0.35 * fs;
+    c.font = `${root ? 650 : 500} ${fs}px ${FONT}`;
+    c.globalAlpha = dim && !onHl ? 0.1 : 1;
+    c.lineWidth = 3 / k; c.strokeStyle = css.bg; c.strokeText(d.title, x, y);
+    c.fillStyle = root ? css.accent : css.ink; c.fillText(d.title, x, y);
+  }
+  c.globalAlpha = 1;
+}
+
+/** Draw at most once per animation frame, however many events ask for it. */
+function requestDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; draw(); });
+}
+function draw() {
+  if (!ctx2) return;
+  const el = cv.node();
+  ctx2.setTransform(1, 0, 0, 1, 0, 0);
+  ctx2.clearRect(0, 0, el.width, el.height);
+  drawScene(ctx2, transform, dpr);
+}
+function sizeCanvas() {
+  dpr = window.devicePixelRatio || 1;
+  const el = cv.node();
+  el.width = Math.round(innerWidth * dpr);
+  el.height = Math.round(innerHeight * dpr);
+  requestDraw();
+}
+
+// ================================================================ pointer: drag, hover, click, zoom
+const pointOf = e => (e.touches && e.touches.length ? [e.touches[0].clientX, e.touches[0].clientY] : [e.clientX, e.clientY]);
+/** Zoom and pan ignore presses on a node, so the node can be dragged instead. */
+function zoomFilter(e) {
+  if (e.type === "wheel") return true;
+  if (e.button) return false;
+  const [x, y] = pointOf(e);
+  if (x == null) return true;
+  return !nodeAt(x, y);
+}
+function wirePointer() {
+  const el = cv.node();
+  el.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    stopAutoFit();
+    suppressClick = false;
+    const d = nodeAt(e.clientX, e.clientY);
+    if (!d) return;
+    drag = { d, pid: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+    d.fx = d.x; d.fy = d.y;
+    sim.alphaTarget(0.2).restart();
+    hideHover();
+    try { el.setPointerCapture(e.pointerId); } catch (err) { /* not supported: drag still works while the pointer stays over the canvas */ }
+  });
+  el.addEventListener("pointermove", e => {
+    if (drag && e.pointerId === drag.pid) {
+      if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 4) drag.moved = true;
+      if (drag.moved) { const [x, y] = worldAt(e.clientX, e.clientY); drag.d.fx = x; drag.d.fy = y; }
+      return;
+    }
+    if (e.buttons) return;   // panning
+    const d = nodeAt(e.clientX, e.clientY);
+    el.style.cursor = d ? "pointer" : "";
+    if (d === hovered) { if (d) placeTip(e.clientX, e.clientY); return; }
+    if (d) { stopAutoFit(); showHover(d); placeTip(e.clientX, e.clientY); }
+    else hideHover();
+  });
+  const endDrag = e => {
+    if (!drag || e.pointerId !== drag.pid) return;
+    const d = drag.d;
+    if (drag.moved) suppressClick = true;   // a drag is not a click
+    sim.alphaTarget(0);
+    if (d.status !== "root") { d.fx = null; d.fy = null; }
+    drag = null;
+    try { el.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+  };
+  el.addEventListener("pointerup", endDrag);
+  el.addEventListener("pointercancel", endDrag);
+  el.addEventListener("pointerleave", () => { if (!drag) hideHover(); });
+  el.addEventListener("click", e => {
+    if (suppressClick) { suppressClick = false; return; }
+    const d = nodeAt(e.clientX, e.clientY);
+    if (d) pin(d); else if (pinned) unpin();   // a click on empty map clears the pin
+  });
+  el.addEventListener("dblclick", e => {
+    const d = nodeAt(e.clientX, e.clientY);
+    if (d) window.open(wikiURL(d.title), "_blank");
+  });
+}
+
 // ================================================================ export
 function exportPNG() {
-  const src = svg.node(), W = innerWidth, H = innerHeight, S = 3;
-  const clone = src.cloneNode(true);
-  const a = src.querySelectorAll("*"), b = clone.querySelectorAll("*");
-  const props = ["fill", "stroke", "stroke-width", "stroke-opacity", "fill-opacity", "opacity", "stroke-dasharray",
-    "stroke-linecap", "stroke-linejoin", "paint-order", "font-size", "font-weight", "font-family", "display", "text-anchor"];
-  a.forEach((el, i) => { const cs = getComputedStyle(el); props.forEach(p => b[i].style.setProperty(p, cs.getPropertyValue(p))); });
-  const css = getComputedStyle(document.documentElement);
-  const ns = "http://www.w3.org/2000/svg";
-  clone.setAttribute("xmlns", ns);
-  clone.setAttribute("width", W * S); clone.setAttribute("height", H * S);
-  clone.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  const bg = document.createElementNS(ns, "rect");
-  bg.setAttribute("width", W); bg.setAttribute("height", H); bg.setAttribute("fill", css.getPropertyValue("--bg").trim());
-  clone.insertBefore(bg, clone.firstChild);
+  const W = innerWidth, H = innerHeight, S = 3;
+  const out = document.createElement("canvas");
+  out.width = W * S; out.height = H * S;
+  const c = out.getContext("2d");
+  c.fillStyle = colours().bg; c.fillRect(0, 0, out.width, out.height);
+  drawScene(c, transform, S);
   const s = graph.stats;
-  const cap = document.createElementNS(ns, "text");
-  cap.setAttribute("x", 28); cap.setAttribute("y", H - 28);
-  cap.setAttribute("style", `font: 600 15px -apple-system, system-ui, sans-serif; fill: ${css.getPropertyValue("--ink").trim()}`);
-  cap.textContent = `All roads lead to Philosophy · ${current.subtitle} · ${plural(s.runs, "route")} · ${s.runs ? Math.round(100 * s.reached / s.runs) : 0}% reached`;
-  clone.appendChild(cap);
-  const img = new Image();
-  img.onload = () => {
-    const c = document.createElement("canvas"); c.width = W * S; c.height = H * S;
-    c.getContext("2d").drawImage(img, 0, 0);
-    c.toBlob(blob => {
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `philosophy-tree-${slotKey}.png`; link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 5000);
-    });
-  };
-  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(clone));
+  c.setTransform(S, 0, 0, S, 0, 0);
+  c.font = `600 15px ${FONT}`; c.fillStyle = colours().ink; c.textAlign = "left"; c.textBaseline = "alphabetic";
+  c.fillText(`All roads lead to Philosophy · ${current.subtitle} · ${plural(s.runs, "route")} · ${s.runs ? Math.round(100 * s.reached / s.runs) : 0}% reached`, 28, H - 28);
+  out.toBlob(blob => {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `philosophy-tree-${slotKey}.png`; link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+  });
 }
