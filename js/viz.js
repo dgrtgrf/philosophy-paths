@@ -135,11 +135,12 @@ export function initViz() {
   svg.node().addEventListener("pointerdown", stopAutoFit, true);
   svg.node().addEventListener("wheel", stopAutoFit, true);
   document.getElementById("search").addEventListener("focus", stopAutoFit);
+  // a click on empty map picks the nearest node (small dots are hard to hit when zoomed out); otherwise it clears the pin
   svg.on("click", e => {
-    if (e.target !== svg.node()) return;
-    if (pinned) unpin(); else { clearTrail(); clearHighlight(); }   // click empty map space to clear
+    if (e.defaultPrevented) return;
+    const d = nearestNode(e);
+    if (d) pin(d); else if (pinned) unpin();
   });
-  svg.on("mouseleave", () => { clearTrail(); if (!pinned) clearHighlight(); });
   // hover snaps to the nearest visible node within about 14 screen pixels, so small dots are easy to reach
   svg.on("pointermove.snap", e => {
     if (e.buttons) return;   // dragging or panning
@@ -180,7 +181,7 @@ export function setData(slot, { routes, mode, analysis, subtitle }) {
     const s = slots.get(slot);
     clearTimeout(fitTimer); fitTimer = null;
     slotKey = slot; byTitle = s.byTitle; autoFitDone = s.autoFitDone;
-    pinned = null; hovered = null; clearTrail();
+    pinned = null; hovered = null;
     if (s.transform) svg.call(zoom.transform, s.transform);
     else svg.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
   }
@@ -294,7 +295,7 @@ function update(g, first) {
 
   document.getElementById("titles").innerHTML = nodes.map(n => `<option value="${esc(n.title)}">`).join("");
   if (pinned && !byTitle.has(pinned.title)) pinned = null;
-  if (pinned) highlight(pinned); else if (trail.nodes.size) paintTrail();
+  if (pinned) highlight(pinned);
   renderSide();
   renderLegend();
   applyHidden();
@@ -491,31 +492,10 @@ function highlight(d) {
   labelSel.classed("hl", n => onRoute.has(n.title));
   linkSel.classed("hl", l => hops.has(l.source.title + "\t" + l.target.title));
 }
-/** Only the path under the pointer is lit; it goes as soon as the pointer is off the node. */
-const trail = { nodes: new Set(), hops: new Set() };
-function showHover(d) {
-  hovered = d;
-  clearTrail(); trailAdd(d);
-  if (!pinned) paintTrail();
-  showTip(d);
-}
-function hideHover() {
-  hovered = null;
-  tip.style.opacity = 0;
-  clearTrail();
-  if (!pinned) clearHighlight();
-}
-function trailAdd(d) {
-  const route = routeFrom(d);
-  for (const n of route) trail.nodes.add(n.title);
-  for (let i = 0; i < route.length - 1; i++) trail.hops.add(route[i].title + "\t" + route[i + 1].title);
-}
-function paintTrail() {
-  svg.classed("dim", true);
-  nodeSel.classed("hl", n => trail.nodes.has(n.title));
-  labelSel.classed("hl", n => trail.nodes.has(n.title));
-  linkSel.classed("hl", l => trail.hops.has(l.source.title + "\t" + l.target.title));
-}
+/** Hovering only shows the name; a path is highlighted when a node is clicked. */
+function showHover(d) { hovered = d; showTip(d); }
+function hideHover() { hovered = null; tip.style.opacity = 0; }
+/** The nearest visible node to the pointer, within about 14 screen pixels. */
 function nearestNode(e) {
   const [x, y] = d3.pointer(e, world.node());
   const k = d3.zoomTransform(svg.node()).k || 1;
@@ -527,7 +507,6 @@ function nearestNode(e) {
   }
   return best;
 }
-function clearTrail() { trail.nodes.clear(); trail.hops.clear(); }
 function clearHighlight() {
   svg.classed("dim", false);
   nodeSel.classed("hl", false); labelSel.classed("hl", false); linkSel.classed("hl", false);
@@ -549,11 +528,7 @@ function placeTip(x, y) {
   tip.style.top = Math.min(y + 16, innerHeight - h - 12) + "px";
 }
 function pin(d) { pinned = d; highlight(d); renderSide(); }
-function unpin() {
-  pinned = null; clearHighlight(); clearTrail();
-  if (hovered) { trailAdd(hovered); paintTrail(); }
-  renderSide();
-}
+function unpin() { pinned = null; clearHighlight(); renderSide(); }
 
 function focusOn(d) {
   if (!d) return;
