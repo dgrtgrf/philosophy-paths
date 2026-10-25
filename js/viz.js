@@ -180,6 +180,8 @@ export function initViz() {
   cv.node().addEventListener("wheel", stopAutoFit, true);
   document.getElementById("search").addEventListener("focus", stopAutoFit);
   wirePointer();
+  // page-level zoom is blocked by the viewport tag; a second finger on the map is always the map's pinch
+  cv.node().addEventListener("touchmove", e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
   requestAnimationFrame(frame);
 
   document.getElementById("mix").addEventListener("input", e => {

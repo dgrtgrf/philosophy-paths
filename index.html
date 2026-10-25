@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>All roads lead to Philosophy</title>
 <meta name="description" content="Click the first link of any Wikipedia article, again and again. Do you always reach Philosophy? Watch it happen.">
 <link rel="canonical" href="https://gettingtophilosophy.com/">
@@ -36,7 +36,7 @@
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
     overflow: hidden; -webkit-font-smoothing: antialiased; }
-  #viz { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  #viz { display: block; position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   #viz:active { cursor: grabbing; }
 
   /* ---------- graph */
@@ -171,6 +171,24 @@
     background: var(--bg); padding: 4px 4px 40px; }
   #page[hidden] { display: none; }
   body.stats #controls, body.stats #side, body.stats #legend, body.stats #empty, body.stats #tip { display: none; }
+
+  /* ---------- trees page */
+  body.trees #controls, body.trees #side, body.trees #legend, body.trees #empty, body.trees #tip { display: none; }
+  body.trees #viz { visibility: hidden; }
+  .tree-tabs { margin: 10px 0 6px; }
+  .tree-stats { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .tree-svg { display: block; width: 100%; touch-action: none; cursor: grab; }
+  .tree-svg:active { cursor: grabbing; }
+  .tree-note { color: var(--muted); font-size: 12px; max-width: 70ch; margin: 14px 0 0; }
+  .tree-tools { display: flex; gap: 8px; margin: 2px 0 6px; }
+  .tree-tools button { font: inherit; font-size: 12px; border: 1px solid var(--rule); background: var(--bg); color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .tree-label { display: none; }
+  .tree-node.hot .tree-label { display: inline; }
+  .tree-h2 { font-size: 15px; margin: 26px 0 6px; }
+  .tree-small { margin: 14px 0 0; }
+  .tree-small-title { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .tree-small-title span { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .tree-svg-small { height: 260px; }
   #page h1 { font-size: 22px; margin: 6px 0 2px; letter-spacing: -.02em; }
   #page .sub { margin: 0 0 14px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
@@ -256,6 +274,7 @@
     <button data-tab="mine" class="on">My tree</button>
     <button data-tab="everyone">Everyone's tree</button>
     <button data-tab="stats">Today</button>
+    <button data-tab="trees">Trees</button>
   </div>
   <div class="sub" id="subtitle"></div>
   <div class="stats" id="stats"></div>

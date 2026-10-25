@@ -3,6 +3,7 @@
 import { Crawler } from "./crawler.js";
 import { initViz, setData, resetSlot, esc, plural } from "./viz.js";
 import { renderStats } from "./stats.js";
+import { renderTrees } from "./trees.js";
 import * as shared from "./shared.js";
 
 const $ = id => document.getElementById(id);
@@ -10,7 +11,7 @@ const MODE_NAMES = { classic: "Classic rules", smart: "Smart rules" };
 const MAX_ROUTES = 500;
 
 const state = {
-  tab: "mine",                      // "mine" | "everyone" | "stats"
+  tab: "mine",                      // "mine" | "everyone" | "stats" | "trees"
   mode: "classic",
   mine: { routes: [], live: null, mode: "classic", running: false, total: 0, status: "", statusKind: "" },
   everyone: { classic: null, smart: null, loading: false, error: null },
@@ -62,6 +63,7 @@ function routesFor(slot) {
 
 function render() {
   if (state.tab === "stats") { renderChrome(); renderStatsPage(); return; }   // show the page first, so charts measure correctly
+  if (state.tab === "trees") { renderChrome(); renderTreesPage(); return; }
   const slot = currentSlot();
   const mode = state.tab === "mine" ? state.mine.mode : state.mode;
   const subtitle = state.tab === "mine" ? `My tree · ${MODE_NAMES[mode]}` : `Everyone's tree · ${MODE_NAMES[mode]}`;
@@ -80,6 +82,15 @@ function renderStatsPage() {
   });
 }
 
+let treesData = null;
+async function renderTreesPage() {
+  if (!treesData) {
+    try { treesData = await (await fetch("data/trees.json")).json(); }
+    catch (e) { $("page").innerHTML = `<p class="sub">Couldn't load the trees just now.</p>`; return; }
+  }
+  renderTrees($("page"), treesData);
+}
+
 function renderChrome() {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === state.tab));
   const modeShown = state.tab === "mine" && state.mine.running ? state.mine.mode : state.mode;
@@ -93,7 +104,8 @@ function renderChrome() {
   $("shareBox").style.display = shared.sharedEnabled() ? "" : "none";
   $("tabs").style.display = shared.sharedEnabled() ? "" : "none";
   document.body.classList.toggle("stats", state.tab === "stats");
-  $("page").hidden = state.tab !== "stats";
+  document.body.classList.toggle("trees", state.tab === "trees");
+  $("page").hidden = !(state.tab === "stats" || state.tab === "trees");
 
   // status line
   const st = $("status");
