@@ -148,7 +148,7 @@ self.onmessage = ({ data: m }) => {
   switch (m.type) {
     case "graph": setGraph(m); break;
     case "neighbours": neighbours = m.nb; break;
-    case "mix": mix = m.mix; applyMix(); break;
+    case "mix": mix = m.mix; applyMix(); if (m.reheat) { sim.alpha(m.reheat); start(); } break;
     case "fix": fix(m); break;
     case "alpha": sim.alpha(m.value); start(); break;
     case "target": sim.alphaTarget(m.value); start(); break;

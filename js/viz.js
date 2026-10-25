@@ -137,7 +137,16 @@ let hovered = null, pinned = null;
 let autoFitDone = false, fitTimer = null;
 function stopAutoFit() { autoFitDone = true; clearTimeout(fitTimer); fitTimer = null; }
 let replaying = false, replayTimer = null;
-let worker = null, gen = 0, lastAnalysis = null;
+let worker = null, gen = 0, lastAnalysis = null, mixQueued = false;
+/** Slider drags fire many input events a frame. Only the latest value is sent, once per frame, with the re-heat. */
+function sendMix() {
+  if (mixQueued) return;
+  mixQueued = true;
+  requestAnimationFrame(() => {
+    mixQueued = false;
+    worker.postMessage({ type: "mix", mix, reheat: 0.5 });
+  });
+}
 
 
 // ================================================================ public API
@@ -174,7 +183,7 @@ export function initViz() {
   requestAnimationFrame(frame);
 
   document.getElementById("mix").addEventListener("input", e => {
-    mix = +e.target.value; applyMix(); worker.postMessage({ type: "alpha", value: 0.5 });
+    mix = +e.target.value; applyMix(); sendMix();
   });
   document.getElementById("topics").addEventListener("change", e => {
     topicsOn = e.target.checked; paintTopics(); renderLegend();
@@ -233,7 +242,6 @@ function applyMix() {
   // Philosophy is held at the centre at Tree rings; at Relevance it is placed by similarity like everything else
   const root = nodes.find(d => d.status === "root");
   if (root) { root.fx = mix < 0.5 ? 0 : null; root.fy = mix < 0.5 ? 0 : null; }
-  worker.postMessage({ type: "mix", mix });   // the worker sets the force strengths for this mix
   requestDraw();   // contour rings are only drawn at Tree rings
 }
 
@@ -714,6 +722,7 @@ const pointOf = e => (e.touches && e.touches.length ? [e.touches[0].clientX, e.t
 /** Zoom and pan ignore presses on a node, so the node can be dragged instead. */
 function zoomFilter(e) {
   if (e.type === "wheel") return true;
+  if (e.touches && e.touches.length > 1) return true;   // pinch: zoom wins, even when a finger is on a node
   if (e.button) return false;
   const [x, y] = pointOf(e);
   if (x == null) return true;
@@ -721,7 +730,18 @@ function zoomFilter(e) {
 }
 function wirePointer() {
   const el = cv.node();
+  const pointers = new Set();   // every pointer currently down: more than one means a pinch or two-finger gesture
+  const cancelDrag = () => {
+    if (!drag) return;
+    const d = drag.d;
+    worker.postMessage({ type: "target", value: 0 });
+    if (d.status !== "root") { d.fx = null; d.fy = null; worker.postMessage({ type: "fix", title: d.title, x: null, y: null }); }
+    try { el.releasePointerCapture(drag.pid); } catch (err) { /* already released */ }
+    drag = null;
+  };
   el.addEventListener("pointerdown", e => {
+    pointers.add(e.pointerId);
+    if (pointers.size > 1) { cancelDrag(); suppressClick = true; return; }   // second finger: zoom, never a node drag
     if (e.button !== 0) return;
     stopAutoFit();
     suppressClick = false;
@@ -752,13 +772,10 @@ function wirePointer() {
     else hideHover();
   });
   const endDrag = e => {
+    pointers.delete(e.pointerId);
     if (!drag || e.pointerId !== drag.pid) return;
-    const d = drag.d;
     if (drag.moved) suppressClick = true;   // a drag is not a click
-    worker.postMessage({ type: "target", value: 0 });
-    if (d.status !== "root") { d.fx = null; d.fy = null; worker.postMessage({ type: "fix", title: d.title, x: null, y: null }); }
-    drag = null;
-    try { el.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+    cancelDrag();
   };
   el.addEventListener("pointerup", endDrag);
   el.addEventListener("pointercancel", endDrag);
