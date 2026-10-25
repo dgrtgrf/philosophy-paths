@@ -7,6 +7,12 @@ import { renderTrees } from "./trees.js";
 import * as shared from "./shared.js";
 
 const $ = id => document.getElementById(id);
+const APP_VERSION = "2026.10.25-1";
+// shown only when this script and the page's <meta name="app-version"> are the same release, so an old cached copy never shows a new version
+(() => {
+  const el = $("version"), page = document.querySelector('meta[name="app-version"]');
+  if (el && page && page.content === APP_VERSION) { el.textContent = "v" + APP_VERSION; el.hidden = false; }
+})();
 const MODE_NAMES = { classic: "Classic rules", smart: "Smart rules" };
 const MAX_ROUTES = 500;
 
