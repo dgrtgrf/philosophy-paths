@@ -115,10 +115,10 @@ function graphForSlot(slot, routes, analysis) {
 }
 
 // ================================================================ state
-let cv = null, ctx2 = null, tip, sim, zoom;
+let cv = null, ctx2 = null, tip, zoom;
 let transform = d3.zoomIdentity, dpr = 1, rings = [];   // rings: contour rings, drawn on the canvas
 let qt = null, qtDirty = true, maxHitR = 0;             // quadtree over visible nodes, for pointer lookups
-let drawQueued = false, drag = null, suppressClick = false;
+let dirty = false, pendingSnap = null, drag = null, suppressClick = false;
 const hl = { on: false, nodes: new Set(), hops: new Set() };   // the route lit by a click
 let nodes = [], links = [], springs = [];
 let byTitle = new Map();
@@ -137,11 +137,8 @@ let hovered = null, pinned = null;
 let autoFitDone = false, fitTimer = null;
 function stopAutoFit() { autoFitDone = true; clearTimeout(fitTimer); fitTimer = null; }
 let replaying = false, replayTimer = null;
-let tickN = 0;
+let worker = null, gen = 0, lastAnalysis = null;
 
-// at Tree rings, only clicks decide position; at Relevance, only similarity does
-const radialStrength = () => 0.5 * (1 - mix);
-const relevanceWeight = () => 3 * mix;
 
 // ================================================================ public API
 export function initViz() {
@@ -152,21 +149,13 @@ export function initViz() {
   sizeCanvas();
   window.addEventListener("resize", sizeCanvas);
 
-  sim = d3.forceSimulation()
-    .force("link", d3.forceLink().id(d => d.title).distance(l => 24 + 70 * (1 - l.sim)).strength(0.9))
-    .force("relevance", d3.forceLink().id(d => d.title).distance(l => 12 + 90 * (1 - l.sim)))
-    .force("charge", d3.forceManyBody().strength(-70).distanceMax(500))
-    .force("collide", d3.forceCollide(d => radius(d) + 1.5).iterations(2))
-    .force("radial", d3.forceRadial(d => ringOf(d), 0, 0))
-    .force("topic", topicForce)
-    .force("neighbours", neighbourForce)
-    .alphaDecay(0.012);
-  sim.on("tick", () => {
-    if (mix < 0.5) clampToRings();
-    qtDirty = true;      // positions moved, so the pointer lookup tree is stale
-    requestDraw();
-  });
-  sim.on("end.fit", () => { if (!autoFitDone) fitView(600); });
+  // the force layout runs in js/sim-worker.js; positions come back in snapshots
+  worker = new Worker("js/sim-worker.js");
+  worker.onmessage = ({ data: m }) => {
+    if (m.gen !== gen) return;      // a snapshot from a graph that has since changed
+    if (m.type === "tick") applySnapshot(m.buf);
+    else if (m.type === "end" && !autoFitDone) fitView(600);
+  };
   window.addEventListener("resize", () => { if (!autoFitDone) fitView(300); });
 
   zoom = d3.zoom().scaleExtent([0.05, 12]).filter(zoomFilter).on("zoom", e => {
@@ -182,9 +171,10 @@ export function initViz() {
   cv.node().addEventListener("wheel", stopAutoFit, true);
   document.getElementById("search").addEventListener("focus", stopAutoFit);
   wirePointer();
+  requestAnimationFrame(frame);
 
   document.getElementById("mix").addEventListener("input", e => {
-    mix = +e.target.value; applyMix(); sim.alpha(0.5).restart();
+    mix = +e.target.value; applyMix(); worker.postMessage({ type: "alpha", value: 0.5 });
   });
   document.getElementById("topics").addEventListener("change", e => {
     topicsOn = e.target.checked; paintTopics(); renderLegend();
@@ -232,6 +222,7 @@ export function setData(slot, { routes, mode, analysis, subtitle }) {
 /** Start a new tree in this slot (forget positions). */
 export function resetSlot(slot) {
   slots.delete(slot);
+  worker.postMessage({ type: "reset", slot });
   if (slot === slotKey) { slotKey = null; byTitle = new Map(); graph = null; autoFitDone = false; }
 }
 
@@ -242,9 +233,7 @@ function applyMix() {
   // Philosophy is held at the centre at Tree rings; at Relevance it is placed by similarity like everything else
   const root = nodes.find(d => d.status === "root");
   if (root) { root.fx = mix < 0.5 ? 0 : null; root.fy = mix < 0.5 ? 0 : null; }
-  sim.force("link").strength(0.9 * (1 - mix));   // route links only matter at Tree rings; at Relevance, topic similarity alone decides
-  sim.force("radial").strength(radialStrength());
-  sim.force("relevance").strength(l => relevanceWeight() * (0.04 + 0.4 * l.sim));
+  worker.postMessage({ type: "mix", mix });   // the worker sets the force strengths for this mix
   requestDraw();   // contour rings are only drawn at Tree rings
 }
 
@@ -275,7 +264,7 @@ function update(g, first) {
     }
     if (d.status === "root") { d.fx = 0; d.fy = 0; d.x = 0; d.y = 0; }
   }
-  links = g.links.map(l => ({ ...l }));
+  links = g.links.map(l => ({ ...l, source: byTitle.get(l.source), target: byTitle.get(l.target) }));
   springs = g.springs;
 
   const maxCount = d3.max(links, d => d.count) || 1;
@@ -298,13 +287,18 @@ function update(g, first) {
   qtDirty = true;
   requestDraw();
 
-  sim.nodes(nodes);
-  sim.force("link").links(links);
-  sim.force("relevance").links(springs);
-  sim.force("radial").radius(d => ringOf(d));
-  sim.force("collide").radius(d => radius(d) + 1.5);
-  applyMix();
-  sim.alpha(first ? 1 : 0.35).restart();
+  if (current.analysis !== lastAnalysis) {
+    lastAnalysis = current.analysis;
+    worker.postMessage({ type: "neighbours", nb: current.analysis?.neighbours || null });
+  }
+  gen++;
+  worker.postMessage({
+    type: "graph", slot: slotKey, gen, first: !!first, mix, R: (maxDepth + 2) * RING,
+    nodes: nodes.map(d => ({ title: d.title, x: d.x, y: d.y, r: radius(d), ring: ringOf(d), depth: d.depth,
+      cluster: d.cluster, status: d.status, fx: d.fx ?? null, fy: d.fy ?? null })),
+    links: links.map(l => ({ source: l.source.title, target: l.target.title, sim: l.sim })),
+    springs: springs.map(sp => ({ source: sp.source, target: sp.target, sim: sp.sim })),
+  });
 
   const titlesEl = document.getElementById("titles");
   for (const d of fresh) {
@@ -321,6 +315,12 @@ function update(g, first) {
 }
 
 function updateLabels() { requestDraw(); }
+
+/** Positions from the worker: one x,y pair per article, in the order the graph was sent. */
+function applySnapshot(buf) {
+  pendingSnap = buf;   // applied on the next frame, so messages never draw
+  dirty = true;
+}
 
 /** Frame the whole tree inside the space the panels leave free. */
 function fitView(duration = 900) {
@@ -566,63 +566,6 @@ function toggleReplay() {
   })();
 }
 
-// ================================================================ rings that bend, clamp
-/** At Relevance only: pull every article towards the middle of its own topic, so topics bunch together. */
-function topicForce(alpha) {
-  const w = 0.3 * mix * alpha;
-  if (w <= 0) return;
-  const sums = new Map();
-  for (const d of nodes) {
-    if (d.cluster == null || d.cluster < 0 || d.x == null) continue;
-    const s = sums.get(d.cluster) || { x: 0, y: 0, n: 0 };
-    s.x += d.x; s.y += d.y; s.n++; sums.set(d.cluster, s);
-  }
-  for (const d of nodes) {
-    const s = sums.get(d.cluster);
-    if (!s || s.n < 2 || d.fx != null) continue;
-    d.vx += (s.x / s.n - d.x) * w; d.vy += (s.y / s.n - d.y) * w;
-  }
-}
-
-/** At Relevance only: pull every article towards the similarity-weighted middle of its nearest
- *  neighbours, so close relatives sit together even when they are not direct springs. */
-function neighbourForce(alpha) {
-  const w = 0.4 * mix * alpha;
-  const nb = current.analysis?.neighbours;
-  if (w <= 0 || !nb) return;
-  for (const d of nodes) {
-    if (d.fx != null || d.x == null) continue;
-    const list = nb[d.title];
-    if (!list) continue;
-    let sx = 0, sy = 0, sw = 0;
-    for (const [t, s] of list) {
-      const o = byTitle.get(t);
-      if (!o || o === d || o.x == null) continue;
-      sx += s * o.x; sy += s * o.y; sw += s;
-    }
-    if (sw <= 0) continue;
-    // a pull only as strong as the matches behind it: weak matches barely move anything
-    const pull = w * Math.min(1, sw / 0.8);
-    d.vx += (sx / sw - d.x) * pull; d.vy += (sy / sw - d.y) * pull;
-  }
-}
-
-/** At Tree rings, articles that never arrive sit strictly outside the dashed "never arrives"
- *  ring, and reached articles never cross it. */
-function clampToRings() {
-  const R = (maxDepth + 2) * RING;
-  for (const d of nodes) {
-    if (d.fx != null || d.x == null) continue;
-    const r = Math.hypot(d.x, d.y);
-    if (d.depth == null) {
-      // never inside the dashed ring; no outer limit, so they can sit as far past it as they need
-      const lo = R * 1.04;
-      if (r < 1e-3) { const a = hash01(d.title) * 2 * Math.PI; d.x = Math.cos(a) * lo; d.y = Math.sin(a) * lo; continue; }
-      if (r < lo) { const sc = lo / r; d.x *= sc; d.y *= sc; }
-    } else if (r > R) { const sc = R / r; d.x *= sc; d.y *= sc; }
-  }
-}
-
 // ================================================================ canvas drawing
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif';
 function colours() {
@@ -666,8 +609,8 @@ function drawScene(c, t, s) {
     }
   }
 
-  // route links
-  c.lineCap = "round";
+  // route links, batched: one stroke per style instead of one per link
+  const linkGroups = new Map();
   for (const l of links) {
     if (linkHidden(l)) continue;
     const ax = l.source.x, ay = l.source.y, bx = l.target.x, by = l.target.y;
@@ -676,15 +619,23 @@ function drawScene(c, t, s) {
         !(Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1)) continue;
     const hop = dim && hl.hops.has(l.source.title + "\t" + l.target.title);
     const w = strokeW(l.count), a = strokeO(l.count);
-    c.globalAlpha = dim && !hop ? a * 0.05 : a;
-    c.strokeStyle = hop ? css.accent : css.ink;
-    c.lineWidth = w;
-    c.setLineDash(l.rescued ? [w + 2, w + 3] : []);
-    c.beginPath(); c.moveTo(l.source.x, l.source.y); c.lineTo(l.target.x, l.target.y); c.stroke();
+    const alpha = dim && !hop ? a * 0.05 : a;
+    const colour = hop ? css.accent : css.ink;
+    const key = colour + "|" + w.toFixed(2) + "|" + alpha.toFixed(3) + "|" + (l.rescued ? 1 : 0);
+    let g = linkGroups.get(key);
+    if (!g) { g = { colour, w, alpha, rescued: !!l.rescued, p: new Path2D() }; linkGroups.set(key, g); }
+    g.p.moveTo(ax, ay); g.p.lineTo(bx, by);
+  }
+  c.lineCap = "round";
+  for (const g of linkGroups.values()) {
+    c.globalAlpha = g.alpha; c.strokeStyle = g.colour; c.lineWidth = g.w;
+    c.setLineDash(g.rescued ? [g.w + 2, g.w + 3] : []);
+    c.stroke(g.p);
   }
   c.setLineDash([]); c.lineCap = "butt";
 
-  // articles
+  // articles, batched: one fill and one stroke per style instead of one per article
+  const nodeGroups = new Map();
   for (const d of nodes) {
     if (d.x == null || hiddenNode(d) || !inView(d.x, d.y)) continue;
     const onHl = hl.nodes.has(d.title);
@@ -699,10 +650,17 @@ function drawScene(c, t, s) {
     }
     if (d.freshUntil > now) { stroke = css.accent; sw = 2; }
     if (onHl) { stroke = css.accent; sw = 2; }
-    c.globalAlpha = dim && !onHl ? 0.15 : 1;
-    c.beginPath(); c.arc(d.x, d.y, radius(d), 0, 2 * Math.PI);
-    c.fillStyle = fill; c.fill();
-    if (stroke) { c.strokeStyle = stroke; c.lineWidth = sw; c.stroke(); }
+    const alpha = dim && !onHl ? 0.15 : 1;
+    const key = fill + "|" + stroke + "|" + sw + "|" + alpha;
+    let g = nodeGroups.get(key);
+    if (!g) { g = { fill, stroke, sw, alpha, p: new Path2D() }; nodeGroups.set(key, g); }
+    const r = radius(d);
+    g.p.moveTo(d.x + r, d.y); g.p.arc(d.x, d.y, r, 0, 2 * Math.PI);
+  }
+  for (const g of nodeGroups.values()) {
+    c.globalAlpha = g.alpha;
+    c.fillStyle = g.fill; c.fill(g.p);
+    if (g.stroke) { c.strokeStyle = g.stroke; c.lineWidth = g.sw; c.stroke(g.p); }
   }
 
   // labels: the first 400 articles, plus more as you zoom in; the root always shows
@@ -721,13 +679,23 @@ function drawScene(c, t, s) {
 }
 
 /** Draw at most once per animation frame, however many events ask for it. */
-function requestDraw() {
-  if (drawQueued) return;
-  drawQueued = true;
-  requestAnimationFrame(() => { drawQueued = false; draw(); });
+function requestDraw() { dirty = true; }
+/** The only place that draws: runs on the browser's frame clock and paints only when something changed. */
+function frame() {
+  requestAnimationFrame(frame);
+  if (!dirty) return;
+  dirty = false;
+  draw();
 }
 function draw() {
   if (!ctx2) return;
+  if (pendingSnap) {   // the newest positions from the worker, applied once per frame
+    const buf = pendingSnap; pendingSnap = null;
+    if (buf.length === nodes.length * 2) {
+      for (let i = 0; i < nodes.length; i++) { nodes[i].x = buf[2 * i]; nodes[i].y = buf[2 * i + 1]; }
+      qtDirty = true;
+    }
+  }
   const el = cv.node();
   ctx2.setTransform(1, 0, 0, 1, 0, 0);
   ctx2.clearRect(0, 0, el.width, el.height);
@@ -761,14 +729,19 @@ function wirePointer() {
     if (!d) return;
     drag = { d, pid: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
     d.fx = d.x; d.fy = d.y;
-    sim.alphaTarget(0.2).restart();
+    worker.postMessage({ type: "fix", title: d.title, x: d.fx, y: d.fy });
+    worker.postMessage({ type: "target", value: 0.2 });
     hideHover();
     try { el.setPointerCapture(e.pointerId); } catch (err) { /* not supported: drag still works while the pointer stays over the canvas */ }
   });
   el.addEventListener("pointermove", e => {
     if (drag && e.pointerId === drag.pid) {
       if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 4) drag.moved = true;
-      if (drag.moved) { const [x, y] = worldAt(e.clientX, e.clientY); drag.d.fx = x; drag.d.fy = y; }
+      if (drag.moved) {
+        const [x, y] = worldAt(e.clientX, e.clientY);
+        drag.d.fx = x; drag.d.fy = y;
+        worker.postMessage({ type: "fix", title: drag.d.title, x, y });
+      }
       return;
     }
     if (e.buttons) return;   // panning
@@ -782,8 +755,8 @@ function wirePointer() {
     if (!drag || e.pointerId !== drag.pid) return;
     const d = drag.d;
     if (drag.moved) suppressClick = true;   // a drag is not a click
-    sim.alphaTarget(0);
-    if (d.status !== "root") { d.fx = null; d.fy = null; }
+    worker.postMessage({ type: "target", value: 0 });
+    if (d.status !== "root") { d.fx = null; d.fy = null; worker.postMessage({ type: "fix", title: d.title, x: null, y: null }); }
     drag = null;
     try { el.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
   };
