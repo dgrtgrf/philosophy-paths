@@ -11,23 +11,39 @@ export const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const wikiURL = t => "https://en.wikipedia.org/wiki/" + encodeURIComponent(t.replace(/ /g, "_"));
 
 // ================================================================ routes → graph
-function buildGraph(routesIn, analysis, upTo = Infinity) {
-  const routes = routesIn.slice(0, upTo);
-  const visits = new Map(), startCount = new Map(), edges = new Map(), outs = new Map();
+/** Route counts that grow batch by batch. Adding a route and removing it are exact inverses, so the
+ *  route still being crawled can be shown without re-reading the finished routes each time. */
+function createBuilder() {
+  return { ingested: [], visits: new Map(), startCount: new Map(), edges: new Map(), outs: new Map() };
+}
+function bump(map, key, by) {
+  const v = (map.get(key) || 0) + by;
+  if (v) map.set(key, v); else map.delete(key);
+  return v;
+}
+function count(acc, routes, sign) {
   for (const r of routes) {
     const p = r.path;
-    startCount.set(p[0], (startCount.get(p[0]) || 0) + 1);
-    for (const t of new Set(p)) visits.set(t, (visits.get(t) || 0) + 1);
+    bump(acc.startCount, p[0], sign);
+    for (const t of new Set(p)) bump(acc.visits, t, sign);
     const rescued = new Set(r.rescued || []);
     for (let i = 0; i < p.length - 1; i++) {
       const key = p[i] + "\t" + p[i + 1];
-      let e = edges.get(key);
-      if (!e) { e = { source: p[i], target: p[i + 1], count: 0, rescued: 0 }; edges.set(key, e); }
-      e.count++; if (rescued.has(i)) e.rescued++;
-      if (!outs.has(p[i])) outs.set(p[i], new Map());
-      const m = outs.get(p[i]); m.set(p[i + 1], (m.get(p[i + 1]) || 0) + 1);
+      let e = acc.edges.get(key);
+      if (!e) { e = { source: p[i], target: p[i + 1], count: 0, rescued: 0 }; acc.edges.set(key, e); }
+      e.count += sign; if (rescued.has(i)) e.rescued += sign;
+      if (e.count === 0) acc.edges.delete(key);
+      let m = acc.outs.get(p[i]);
+      if (!m) { m = new Map(); acc.outs.set(p[i], m); }
+      bump(m, p[i + 1], sign);
+      if (!m.size) acc.outs.delete(p[i]);
     }
   }
+}
+
+/** The tree for a set of routes, from the counts in acc. routes is used only for the statistics. */
+function graphFrom(acc, analysis, routes) {
+  const { visits, startCount, edges, outs } = acc;
   const rev = new Map();
   for (const e of edges.values()) { if (!rev.has(e.target)) rev.set(e.target, []); rev.get(e.target).push(e.source); }
   const depth = new Map();
@@ -39,8 +55,8 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
       for (const pv of rev.get(c) || []) if (!depth.has(pv)) { depth.set(pv, depth.get(c) + 1); q.push(pv); }
     }
   }
-  const argmax = m => m ? [...m.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
-  const nodes = [...visits.keys()].sort((a, b) => visits.get(b) - visits.get(a) || (a < b ? -1 : 1)).map(t => ({
+  const argmax = m => m ? [...m.entries()].sort((x, y) => y[1] - x[1])[0][0] : null;
+  const nodes = [...visits.keys()].sort((x, y) => visits.get(y) - visits.get(x) || (x < y ? -1 : 1)).map(t => ({
     title: t, visits: visits.get(t), starts: startCount.get(t) || 0,
     depth: depth.has(t) ? depth.get(t) : null,
     status: t === TARGET ? "root" : depth.has(t) ? "reaches" : "stranded",
@@ -49,11 +65,11 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
   const links = [...edges.values()].map(e => ({
     source: e.source, target: e.target, count: e.count,
     sim: analysis.sims?.[e.source + "\t" + e.target] ?? 0, rescued: e.rescued > 0,
-  })).sort((a, b) => a.count - b.count);
-  const springs = (analysis.springs || []).filter(s => visits.has(s.source) && visits.has(s.target)).map(s => ({ ...s }));
+  })).sort((x, y) => x.count - y.count);
+  const springs = (analysis.springs || []).filter(sp => visits.has(sp.source) && visits.has(sp.target)).map(sp => ({ ...sp }));
 
   const reached = routes.filter(r => r.outcome === "philosophy");
-  const clicks = reached.map(r => r.path.length - 1).sort((a, b) => a - b);
+  const clicks = reached.map(r => r.path.length - 1).sort((x, y) => x - y);
   const stats = {
     runs: routes.length, articles: nodes.length, reached: reached.length,
     median: clicks.length ? clicks[Math.floor(clicks.length / 2)] : null,
@@ -62,6 +78,40 @@ function buildGraph(routesIn, analysis, upTo = Infinity) {
     clicks,
   };
   return { nodes, links, springs, stats, routes };
+}
+
+/** Full build from a list of routes (used by replay, and whenever the slot can't be extended). */
+function buildGraph(routesIn, analysis, upTo = Infinity) {
+  const routes = routesIn.slice(0, upTo);
+  const acc = createBuilder();
+  count(acc, routes, +1);
+  return graphFrom(acc, analysis, routes);
+}
+
+/** Incremental build for a tab: finished routes are counted once, and only new ones are added after that.
+ *  A route still being crawled (outcome "walking") is added for this build only, then taken out again. */
+function graphForSlot(slot, routes, analysis) {
+  const s = slots.get(slot);
+  const n = routes.length;
+  const tail = n && routes[n - 1].outcome === "walking" ? routes[n - 1] : null;
+  const body = tail ? routes.slice(0, n - 1) : routes;
+  let acc = s.builder;
+  const extendable = acc && body.length >= acc.ingested.length && acc.ingested.every((r, i) => r === body[i]);
+  if (!extendable) {
+    acc = createBuilder();
+    count(acc, body, +1);
+    acc.ingested = body.slice();
+  } else if (body.length > acc.ingested.length) {
+    const fresh = body.slice(acc.ingested.length);
+    count(acc, fresh, +1);
+    for (const r of fresh) acc.ingested.push(r);
+  }
+  s.builder = acc;
+  if (!tail) return graphFrom(acc, analysis, routes);
+  count(acc, [tail], +1);
+  const g = graphFrom(acc, analysis, routes);
+  count(acc, [tail], -1);
+  return g;
 }
 
 // ================================================================ state
@@ -156,6 +206,9 @@ export function initViz() {
   applyMix();
 }
 
+let titleSet = new Set();
+function resetTitles() { titleSet = new Set(); document.getElementById("titles").innerHTML = ""; }
+
 /** Show (or update) a tree. slot keeps each tab's layout separate. */
 export function setData(slot, { routes, mode, analysis, subtitle }) {
   const switching = slot !== slotKey;
@@ -167,12 +220,13 @@ export function setData(slot, { routes, mode, analysis, subtitle }) {
     clearTimeout(fitTimer); fitTimer = null;
     slotKey = slot; byTitle = s.byTitle; autoFitDone = s.autoFitDone;
     pinned = null; hovered = null; clearHighlight();
+    resetTitles();
     if (s.transform) cv.call(zoom.transform, s.transform);
     else cv.call(zoom.transform, d3.zoomIdentity.translate(innerWidth / 2, innerHeight / 2).scale(0.5));
   }
   current = { routes, mode, analysis: analysis || {}, subtitle };
   if (replaying) return;               // replay keeps going; it picks up the new data when done
-  update(buildGraph(routes, current.analysis), switching || !graph);
+  update(graphForSlot(slot, routes, current.analysis), switching || !graph);
 }
 
 /** Start a new tree in this slot (forget positions). */
@@ -252,7 +306,12 @@ function update(g, first) {
   applyMix();
   sim.alpha(first ? 1 : 0.35).restart();
 
-  document.getElementById("titles").innerHTML = nodes.map(n => `<option value="${esc(n.title)}">`).join("");
+  const titlesEl = document.getElementById("titles");
+  for (const d of fresh) {
+    if (titleSet.has(d.title)) continue;
+    titleSet.add(d.title);
+    const opt = document.createElement("option"); opt.value = d.title; titlesEl.appendChild(opt);
+  }
   if (pinned && !byTitle.has(pinned.title)) pinned = null;
   if (pinned) highlight(pinned);
   renderSide();
@@ -295,14 +354,18 @@ function renderHeader() {
     ["Reached Philosophy", s.runs ? Math.round(100 * s.reached / s.runs) + "%" : "–"],
     ["Median clicks", s.median ?? "–"], ["Longest route", s.longest ?? "–"]];
   if (current.mode === "smart") rows.push(["Rescued clicks", s.rescued]);
-  document.getElementById("stats").innerHTML = rows.map(([a, b]) => `<span>${a}</span><b>${b}</b>`).join("");
+  const statsHTML = rows.map(([a, b]) => `<span>${a}</span><b>${b}</b>`).join("");
+  const statsEl = document.getElementById("stats");
+  if (statsEl.dataset.html !== statsHTML) { statsEl.innerHTML = statsHTML; statsEl.dataset.html = statsHTML; }
   document.getElementById("subtitle").textContent = replaying ? `Replaying · ${plural(s.runs, "route")}` : current.subtitle;
 }
 
+let lastSide = null, lastLegend = null;
 function renderSide() {
   const side = document.getElementById("side");
   document.body.classList.toggle("has-pin", !!pinned);
-  if (pinned) { side.innerHTML = pinnedHTML(pinned); wireSide(side); return; }
+  const setSide = html => { if (html !== lastSide) { side.innerHTML = html; lastSide = html; wireSide(side); } };
+  if (pinned) { setSide(pinnedHTML(pinned)); return; }
   const s = graph.stats;
   const busiest = graph.nodes.filter(n => n.status !== "root").slice(0, 8);
   const top = busiest[0]?.visits || 1;
@@ -319,8 +382,7 @@ function renderSide() {
       <div class="hist-axis"><span>${lo}</span><span>${hi}</span></div></div>`;
   }
   html += `<div class="section sub" style="margin-bottom:0">Click a dot to pin its route · double-click to open it on Wikipedia.</div>`;
-  side.innerHTML = html;
-  wireSide(side);
+  setSide(html);
 }
 
 function pinnedHTML(d) {
@@ -395,7 +457,11 @@ function renderLegend() {
   html += `<div class="hint">Scroll to zoom · F to re-frame · Esc to unpin</div>`;
   // forget picks for groups that no longer exist, so the map can't end up empty
   for (const k of [...picked]) if (!keys.includes(k)) picked.delete(k);
-  for (const id of ["legend", "legendMobile"]) { const el = document.getElementById(id); el.innerHTML = html; el.onclick = toggleLegend; }
+  if (html !== lastLegend) {
+    lastLegend = html;
+    for (const id of ["legend", "legendMobile"]) document.getElementById(id).innerHTML = html;
+  }
+  for (const id of ["legend", "legendMobile"]) document.getElementById(id).onclick = toggleLegend;
 }
 
 function paintTopics() { requestDraw(); }
@@ -488,7 +554,7 @@ function toggleReplay() {
   if (!total) return;
   replaying = true; document.getElementById("replay").textContent = "■ Stop";
   pinned = null;
-  byTitle.clear(); update(buildGraph(current.routes, current.analysis, 0), true);
+  byTitle.clear(); resetTitles(); update(buildGraph(current.routes, current.analysis, 0), true);
   const step = Math.max(60, Math.min(400, 12000 / total));
   let n = 0;
   (function tick() {
@@ -571,10 +637,18 @@ const linkHidden = l => {
   return hiddenNode(l.source) || hiddenNode(l.target) || (isHidden("rescued") && !!l.rescued);
 };
 
+/** Anything this far (in graph units) outside the screen is still drawn, so edges and labels never pop in at the border. */
+const CULL_PAD = 100;
+
 /** Paint the whole tree into c. t is the view transform; s is device pixels per CSS pixel. */
 function drawScene(c, t, s) {
   const css = colours(), k = t.k, now = performance.now(), dim = hl.on;
   c.setTransform(s * k, 0, 0, s * k, s * t.x, s * t.y);
+  // visible world rectangle, padded: the screen corners mapped back into graph units
+  const cw = c.canvas.width / s, ch = c.canvas.height / s;
+  const x0 = -t.x / k - CULL_PAD, x1 = (cw - t.x) / k + CULL_PAD;
+  const y0 = -t.y / k - CULL_PAD, y1 = (ch - t.y) / k + CULL_PAD;
+  const inView = (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
   c.globalAlpha = 1;
   c.lineJoin = "round";
 
@@ -596,6 +670,10 @@ function drawScene(c, t, s) {
   c.lineCap = "round";
   for (const l of links) {
     if (linkHidden(l)) continue;
+    const ax = l.source.x, ay = l.source.y, bx = l.target.x, by = l.target.y;
+    // drawn if an end is on screen, or the segment crosses the screen (both ends can be off it)
+    if (!inView(ax, ay) && !inView(bx, by) &&
+        !(Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1)) continue;
     const hop = dim && hl.hops.has(l.source.title + "\t" + l.target.title);
     const w = strokeW(l.count), a = strokeO(l.count);
     c.globalAlpha = dim && !hop ? a * 0.05 : a;
@@ -608,7 +686,7 @@ function drawScene(c, t, s) {
 
   // articles
   for (const d of nodes) {
-    if (d.x == null || hiddenNode(d)) continue;
+    if (d.x == null || hiddenNode(d) || !inView(d.x, d.y)) continue;
     const onHl = hl.nodes.has(d.title);
     let fill = d.status === "root" ? css.accent
       : d.status === "stranded" ? css.bg
@@ -630,7 +708,7 @@ function drawScene(c, t, s) {
   // labels: the first 400 articles, plus more as you zoom in; the root always shows
   c.textAlign = "left"; c.textBaseline = "alphabetic";
   for (const d of nodes) {
-    if (d.x == null || hiddenNode(d) || d.rank >= 400) continue;
+    if (d.x == null || hiddenNode(d) || d.rank >= 400 || !inView(d.x, d.y)) continue;
     if (!(d.status === "root" || d.rank < 14 * k * k)) continue;
     const fs = 11.5 / k, onHl = hl.nodes.has(d.title), root = d.status === "root";
     const x = d.x + radius(d) + 4 / k, y = d.y + 0.35 * fs;
